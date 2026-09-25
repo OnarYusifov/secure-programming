@@ -52,7 +52,7 @@ flowchart LR
 
     subgraph TB2["Trust boundary 2: file system (untrusted)"]
         idx[("users.json<br/>username to vault file")]
-        vault[("vault-&lt;id&gt;.bin<br/>one per user")]
+        vault[("vault-ID.bin<br/>one per user")]
     end
 
     subgraph TB3["Trust boundary 3: OS services (outside our control)"]
