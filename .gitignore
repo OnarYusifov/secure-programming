@@ -1,0 +1,19 @@
+# Course materials (lecture slides, briefs) — reference only, not part of the deliverable
+Docs/
+
+# Claude Code / AI tooling — local assistant context, never committed
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.claude-flow/
+.mcp.json
+.swarm/
+.hive-mind/
+claude-flow.config.json
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
