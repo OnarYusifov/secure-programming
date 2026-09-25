@@ -221,3 +221,87 @@ flowchart LR
   rights, keyloggers and kernel-level attacks can defeat any local password manager.
 - Hardware attacks such as cold-boot memory attacks are out of scope.
 - The user chooses a master password that meets the policy, and keeps the recovery key private.
+
+## 4. Cryptographic scheme and vault format
+
+Initial design decision. Every choice below traces back to a threat in section 3.
+
+### Scheme: envelope encryption
+
+```
+master password --Argon2id(salt)-------> KEK_pw --AES-256-GCM wrap--+
+                                                                    +--> DEK (random 256-bit) --AES-256-GCM--> vault body
+recovery key   --HKDF-SHA256(salt)----> KEK_rk --AES-256-GCM wrap--+
+```
+
+| Element | Choice | Why (threat) |
+|---|---|---|
+| Password KDF | **Argon2id**, 64 MiB memory, 3 iterations, 4 lanes, 16-byte random salt, 32-byte output (RFC 9106 recommended profile) | Slow and memory-hard, so offline guessing on GPUs is expensive (T1). The salt defeats precomputed tables |
+| Parameter floor | The minimums above are constants in the code; a vault header with weaker parameters is refused | T7: an attacker cannot make brute force cheaper by editing the header or a config file |
+| Data key (DEK) | 256 random bits from the OS CSPRNG (`secrets`) | Independent of the password, so changing the password only re-wraps the DEK (UC7) |
+| Encryption | **AES-256-GCM** (authenticated encryption, AEAD) for the vault body and for each wrapped DEK | Confidentiality (T6) and integrity: any modified byte makes decryption fail (T7, T8) |
+| Nonces | A fresh random 96-bit nonce for every encryption, including every save | A nonce must never repeat under the same key. With random nonces, the safe limit (about 2^32 encryptions per key) is far beyond our save volume |
+| Associated data | Format version, vault ID, username and KDF parameters are authenticated but not encrypted | Binds each vault to its owner and its parameters (T7, T8) |
+| Recovery key | 160 random bits, shown once as 32 Base32 characters in groups of 4; its KEK is derived with **HKDF-SHA256** | It is already high-entropy, so a slow KDF is not needed. Using it forces a new master password and a new recovery key (T5) |
+| Login check | No password hash is stored. A wrong password fails the tag check when unwrapping the DEK | No extra offline target on disk; one generic error (T4) |
+| Password generator | `secrets` module, 20 characters by default | CSPRNG output, not predictable (T20) |
+| TOTP codes | `cryptography`'s TOTP implementation (RFC 6238) | No extra dependency (T23) |
+
+### Vault file format (`vault-ID.bin`, format version 1)
+
+A UTF-8 JSON document. Binary fields are Base64-encoded. It is parsed strictly: unknown fields,
+missing fields, wrong types and oversized values are rejected before any cryptography runs.
+
+```json
+{
+  "format": 1,
+  "vault_id": "3f9c0d2e8a7b4c61a2e5f0b9d8c7a6e1",
+  "username": "alice",
+  "kdf": { "alg": "argon2id", "m_kib": 65536, "t": 3, "p": 4, "salt": "<b64, 16 bytes>" },
+  "wrapped_dek": {
+    "password": { "nonce": "<b64, 12 bytes>", "ct": "<b64, 32-byte DEK + 16-byte tag>" },
+    "recovery": { "salt": "<b64, 16 bytes>", "nonce": "<b64, 12 bytes>", "ct": "<b64>" }
+  },
+  "body": { "nonce": "<b64, 12 bytes>", "ct": "<b64, encrypted entries + tag>" }
+}
+```
+
+The decrypted body is also JSON:
+
+```json
+{
+  "counter": 42,
+  "entries": [
+    { "id": "...", "type": "login", "name": "github", "username": "...", "password": "...",
+      "url": "...", "notes": "...", "created": "...", "modified": "..." },
+    { "id": "...", "type": "totp", "name": "google", "secret": "..." },
+    { "id": "...", "type": "ssh", "name": "work-server", "private_key": "..." }
+  ]
+}
+```
+
+`counter` increases on every save and is shown after unlock, which helps the user notice a rollback (T9).
+
+`users.json` holds only `username` → `vault_id` and contains no secrets. Vault file names are
+random IDs, never usernames (T11).
+
+## 5. Language and libraries
+
+**Python 3.12+.** I have much more experience with Python than with C, and unfamiliar code is where
+implementation errors come from, so choosing the language I know reduces the chance of
+introducing vulnerabilities. Python is also memory-safe: bounds checking, automatic memory management
+and arbitrary-precision integers remove whole classes of C vulnerabilities, such as buffer overflows,
+use-after-free, integer overflow leading to undersized buffers, and format-string attacks.
+The cost is that Python cannot reliably wipe secrets from memory, because `str` and `bytes` are
+immutable and may be copied. This is handled as partial mitigation plus accepted residual risk
+(T13, T14).
+
+| Library | Purpose | Why |
+|---|---|---|
+| `cryptography` (pyca, >= 44) | Argon2id, AES-256-GCM, HKDF, TOTP | Widely used and audited; one dependency covers every primitive, so we do not implement any cryptography ourselves |
+| `pyperclip` (CP3) | Clipboard copy and clearing | Small, cross-platform |
+| `textual` (CP3) | Full-screen TUI | Modern terminal UI on top of the same core |
+| Standard library: `secrets`, `getpass`, `json`, `os`, `pathlib` | CSPRNG, masked input, parsing, file I/O | No extra dependencies |
+
+Development and CI: `pytest`, `ruff`, `mypy`, `bandit` (static security analysis) and `pip-audit`
+(known vulnerabilities in dependencies). All dependency versions are pinned with hashes (T23, T24).
