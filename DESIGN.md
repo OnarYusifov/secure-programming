@@ -52,7 +52,7 @@ flowchart LR
 
     subgraph TB2["Trust boundary 2: file system (untrusted)"]
         idx[("users.json<br/>username to vault file")]
-        vault[("vault-ID.bin<br/>one per user")]
+        vault[("vault-ID.json<br/>one per user")]
     end
 
     subgraph TB3["Trust boundary 3: OS services (outside our control)"]
@@ -87,7 +87,8 @@ flowchart LR
 
 | Item | Location | Form |
 |---|---|---|
-| Vault contents (A1, A6, A7) | `vault-<id>.bin` on disk | Encrypted and authenticated with the DEK |
+| Data directory | `~/.yunarpass/` by default, overridable with the `YUNARPASS_HOME` environment variable (never with a command-line path) | Created owner-only |
+| Vault contents (A1, A6, A7) | `vault-<id>.json` in the data directory | Encrypted and authenticated with the DEK |
 | DEK | Vault file header | Wrapped twice: by the KEK from the master password, and by the key from the recovery key |
 | KEK | RAM only | Derived at login, discarded after the DEK is unwrapped |
 | DEK in plaintext | RAM only | Only while unlocked; dropped on lock, auto-lock or exit |
@@ -170,8 +171,8 @@ flowchart LR
 
 | ID | Misuse case (misuser) | Threatens | Risk | Mitigation | Residual risk |
 |---|---|---|---|---|---|
-| T1 | Brute-force the master password offline against a copied vault file (M1) | UC2 | High | Memory-hard KDF (Argon2id) with a per-user random salt; minimum length and a blocklist of common passwords at UC1/UC7 | A weak but allowed password can still be guessed eventually |
-| T2 | Guess passwords online at the login prompt (M2) | UC2 | Medium | The KDF makes every attempt slow; a growing delay after each failure. The delay values are constants in the code; configuration can only make them stricter | The offline attack (T1) skips our program entirely, so only the KDF cost applies there |
+| T1 | Brute-force the master password offline against a copied vault file (M1) | UC2 | High | Memory-hard KDF (Argon2id) with a per-user random salt; at least 12 characters and not in a blocklist of the 10 000 most common passwords, checked at UC1/UC7 | A weak but allowed password can still be guessed eventually |
+| T2 | Guess passwords online at the login prompt (M2) | UC2 | Medium | The KDF makes every attempt slow; a delay of 1 s after the first failure, doubling after each further one. The delay values are constants in the code; configuration can only make them stricter | The offline attack (T1) skips our program entirely, so only the KDF cost applies there |
 | T3 | Read the password as it is typed (M4) | UC2 | Low | Masked input, never echoed | Physical observation of the keyboard |
 | T4 | Learn which usernames exist from error messages or timing (M2) | UC2 | Low | One generic login error; the KDF also runs for unknown usernames | None significant |
 | T5 | Steal or photograph the paper recovery key (M4) | UC8 | Medium | High-entropy key shown only once; using it forces a new master password and a new recovery key | Unlike 1Password's Emergency Kit, which is a second factor, our recovery key alone opens the vault. This is a deliberate trade of confidentiality for availability |
@@ -192,9 +193,9 @@ flowchart LR
 
 | ID | Misuse case (misuser) | Threatens | Risk | Mitigation | Residual risk |
 |---|---|---|---|---|---|
-| T13 | Read secrets from the process memory (M3) | UC2, UC3 | Medium | Secrets kept for as short a time as possible; keys held in `bytearray` and overwritten after use; the vault locks when not in use | Python `str`/`bytes` are immutable and may be copied, so wiping cannot be guaranteed. Malware running as the user is ultimately out of scope (see Assumptions) |
+| T13 | Read secrets from the process memory (M3) | UC2, UC3 | Medium | Secrets are kept alive as briefly as possible: the password and KEK are dropped right after the DEK is unwrapped, and the DEK is dropped on lock. Wiping is best-effort only | Python `str`/`bytes` are immutable, and the crypto library takes keys as `bytes`, so copies that cannot be overwritten always exist. Wiping cannot be guaranteed; only the lifetime is controlled. Malware running as the user is ultimately out of scope (see Assumptions) |
 | T14 | Secrets written to disk through the pagefile, swap or a crash dump (M1) | UC2 | Low | Core dumps disabled where the OS allows it; secrets kept in memory only briefly | The Windows pagefile cannot be controlled from Python. Accepted |
-| T15 | Use an unlocked session left unattended (M2, M4) | UC3 | Medium | Auto-lock after a period of inactivity; `lock` command; keys discarded on lock | Within the timeout window |
+| T15 | Use an unlocked session left unattended (M2, M4) | UC3 | Medium | Auto-lock after 5 minutes of inactivity; `lock` command; keys discarded on lock | Within the timeout window |
 
 ### Interface (A2, A8)
 
@@ -211,7 +212,7 @@ flowchart LR
 | ID | Misuse case (misuser) | Threatens | Risk | Mitigation | Residual risk |
 |---|---|---|---|---|---|
 | T21 | One vault breach reveals both a password and its TOTP secret (M1, M3) | UC9 | Medium | Same protection as the rest of the vault | Storing both factors together is a deliberate usability trade-off. Accepted and documented |
-| T22 | Another process uses or reads an SSH key loaded into the agent (M3) | UC10 | Medium | The key goes to `ssh-add` through stdin, never as a file; loaded with a short lifetime (`-t`) | Any process of the same user can use the agent until the lifetime ends |
+| T22 | Another process uses or reads an SSH key loaded into the agent (M3) | UC10 | Medium | The key goes to `ssh-add` through stdin, never as a file; loaded with a 10-minute lifetime (`-t 600`) | Any process of the same user can use the agent until the lifetime ends |
 | T23 | A malicious or vulnerable dependency (supply chain) | all | Medium | Few, well-known libraries; pinned versions; dependency scanning in CI | Trust in the chosen libraries |
 | T24 | Modify the installed program or its dependencies to capture the master password (M2, M3) | UC2 | Medium | Installed where normal users cannot write; dependencies pinned with hashes (`pip --require-hashes`); release checksums published for verification | Anyone who can write to the install can change anything. A self-check inside the program could simply be removed, so none is claimed. The vault does not depend on the program: without the password, a modified copy cannot decrypt anything |
 
@@ -241,13 +242,14 @@ recovery key   --HKDF-SHA256(salt)----> KEK_rk --AES-256-GCM wrap--+
 | Data key (DEK) | 256 random bits from the OS CSPRNG (`secrets`) | Independent of the password, so changing the password only re-wraps the DEK (UC7) |
 | Encryption | **AES-256-GCM** (authenticated encryption, AEAD) for the vault body and for each wrapped DEK | Confidentiality (T6) and integrity: any modified byte makes decryption fail (T7, T8) |
 | Nonces | A fresh random 96-bit nonce for every encryption, including every save | A nonce must never repeat under the same key. With random nonces, the safe limit (about 2^32 encryptions per key) is far beyond our save volume |
-| Associated data | Format version, vault ID, username and KDF parameters are authenticated but not encrypted | Binds each vault to its owner and its parameters (T7, T8) |
+| Associated data | The header (format version, vault ID, username, KDF parameters and salts) is passed as associated data to all three encryptions: both DEK wraps and the body. It is authenticated but not encrypted | Binds each vault to its owner and its parameters; any change to the header makes every unwrap and the body decryption fail (T7, T8) |
+| Password change (UC7) | A new salt and KEK are derived from the new password and the DEK is re-wrapped; the body and the recovery wrap are unchanged | The vault is never re-encrypted, so a change is fast and cannot half-complete |
 | Recovery key | 160 random bits, shown once as 32 Base32 characters in groups of 4; its KEK is derived with **HKDF-SHA256** | It is already high-entropy, so a slow KDF is not needed. Using it forces a new master password and a new recovery key (T5) |
 | Login check | No password hash is stored. A wrong password fails the tag check when unwrapping the DEK | No extra offline target on disk; one generic error (T4) |
 | Password generator | `secrets` module, 20 characters by default | CSPRNG output, not predictable (T20) |
 | TOTP codes | `cryptography`'s TOTP implementation (RFC 6238) | No extra dependency (T23) |
 
-### Vault file format (`vault-ID.bin`, format version 1)
+### Vault file format (`vault-<id>.json`, format version 1)
 
 A UTF-8 JSON document. Binary fields are Base64-encoded. It is parsed strictly: unknown fields,
 missing fields, wrong types and oversized values are rejected before any cryptography runs.
@@ -283,7 +285,19 @@ The decrypted body is also JSON:
 `counter` increases on every save and is shown after unlock, which helps the user notice a rollback (T9).
 
 `users.json` holds only `username` → `vault_id` and contains no secrets. Vault file names are
-random IDs, never usernames (T11).
+random IDs, never usernames (T11). Registration refuses an existing username, and `users.json` is
+written atomically in the same way as the vault, so two registrations cannot corrupt it.
+
+### Limits (constants in the code; configuration may only tighten them)
+
+| Limit | Default |
+|---|---|
+| Master password | at least 12 characters, not in the 10 000-most-common blocklist |
+| Argon2id floor | 64 MiB, 3 iterations, 4 lanes |
+| Login delay | 1 s after the first failure, doubling |
+| Auto-lock | 5 minutes idle |
+| Clipboard clear | 20 seconds |
+| ssh-agent key lifetime | 10 minutes |
 
 ## 5. Language and libraries
 
