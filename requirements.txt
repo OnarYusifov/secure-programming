@@ -1,0 +1,2 @@
+# Runtime dependencies, pinned with hashes (pip-compile --generate-hashes).
+# Empty until Checkpoint 2 adds `cryptography`.
