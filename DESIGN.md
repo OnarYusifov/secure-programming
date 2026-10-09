@@ -1,6 +1,8 @@
 # Design Document: Password Manager
 
-ICS0022 Secure Programming, semester project. Checkpoint 1: threat model and architecture.
+ICS0022 Secure Programming, semester project. Written for Checkpoint 1 (threat model and
+architecture) and kept up to date while the code is built: §6 records where the build differs from
+the original design, and §7 maps every threat to the code and tests that handle it.
 
 ## 1. Assets
 
@@ -47,7 +49,7 @@ flowchart LR
         sess["Session manager<br/>unlock state, auto-lock timer"]
         um["User-management module<br/>register, login, change password, recover"]
         crypto["Encryption module<br/>KDF, AEAD, DEK wrap/unwrap, CSPRNG"]
-        store["Storage layer<br/>path validation, 0600 permissions, atomic writes"]
+        store["Storage layer<br/>path validation, owner-only permissions, atomic writes"]
     end
 
     subgraph TB2["Trust boundary 2: file system (untrusted)"]
@@ -187,7 +189,7 @@ flowchart LR
 | T9 | Roll the vault back to an older copy (M1, M2) | UC3 | Low | A version counter inside the encrypted vault is shown to the user after unlock | Not fully preventable locally: the attacker can roll back every file at once. Accepted |
 | T10 | Crash or power loss during a save corrupts the vault (availability) | UC3 | Medium | Atomic save: write a temp file, flush it, then rename; the previous encrypted copy is kept as a backup | Disk failure; users are told to back up the vault file |
 | T11 | Path traversal or a symlink/hard link through a crafted username or file name (M2) | UC1, UC2 | Medium | Vault file names are random IDs, never the username; usernames are checked against an allow-list; the tool refuses symlinks and files it does not own; the data directory is owner-only | None significant |
-| T12 | Another OS user reads the vault files (M2) | UC3 | Low | Files created owner-only (0600 / owner-only ACL on Windows), as defence in depth on top of T6 | An administrator can always read them, but only as ciphertext |
+| T12 | Another OS user reads the vault files (M2) | UC3 | Low | Files created owner-only, as defence in depth on top of T6: mode 0600 (directory 0700) on POSIX; on Windows a protected ACL that grants access to the current user only, set when the file is created, so there is no moment when the file is readable by others (§6) | An administrator can always read them, but only as ciphertext |
 
 ### Vault in memory (A1, A2, A3)
 
@@ -203,9 +205,10 @@ flowchart LR
 |---|---|---|---|---|---|
 | T16 | Secrets leak into the shell history or process list (M2, M3) | UC2, UC3 | Medium | Secrets are never accepted as command-line arguments, only through masked prompts | None significant |
 | T17 | Secrets leak through logs, error messages or tracebacks (M2) | all | Medium | No secrets are logged; the user sees generic errors, never raw tracebacks | None significant |
-| T18 | Read a copied password from the clipboard or clipboard history (M3) | UC4 | Medium | Clipboard cleared after 20 seconds; copying preferred over printing | Clipboard-history tools may keep copies. Accepted and documented |
+| T18 | Read a copied password from the clipboard or clipboard history (M3) | UC4 | Medium | Clipboard cleared after 20 seconds, but only if it still holds our value, so a newer copy by the user is never overwritten; also cleared on lock and quit. On Windows the copy is marked with the `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` = 0 and `CanUploadToCloudClipboard` = 0 formats, which keep it out of the Win+V history and the cloud clipboard | Any process of the same user can read the clipboard within the 20 s, and third-party clipboard managers may ignore the exclusion formats. Accepted and documented |
 | T19 | Malicious input: overlong fields, control characters, terminal escape sequences in entry names (M2) | UC3 | Low | Allow-list validation and length limits at input; control characters removed on output | None significant |
 | T20 | Guess generated passwords because they are predictable | UC5 | High if present | Generated with the `secrets` CSPRNG, never `random` | None significant |
+| T25 | Read a stored or generated password from the screen, the terminal scrollback or a screen recording (M4, M3). *Added in CP2, see §6* | UC3, UC5 | Medium | Passwords are never printed: `show` always masks, `gen` copies the password or fills it into the entry, and `copy` is the only way to use a stored password | The recovery key is printed once at registration and recovery, because the user must write it down; it stays in the scrollback until the terminal is closed or cleared (see T5) |
 
 ### Extra features and supply chain
 
@@ -313,7 +316,8 @@ immutable and may be copied. This is handled as partial mitigation plus accepted
 | Library | Purpose | Why |
 |---|---|---|
 | `cryptography` (pyca, >= 44) | Argon2id, AES-256-GCM, HKDF, TOTP | Widely used and audited; one dependency covers every primitive, so we do not implement any cryptography ourselves |
-| `pyperclip` (CP3) | Clipboard copy and clearing | Small, cross-platform |
+| `pywin32` (Windows only) | Owner-only ACL when creating the data directory and files (T12); clipboard copy that stays out of the clipboard history (T18) | `os.chmod` on Windows can only set the read-only flag, so the standard library cannot make a file owner-only. A plain-text clipboard library cannot set the history-exclusion formats. Replaces `pyperclip` (§6) |
+| `pbcopy` / `wl-copy` / `xclip` (system tools, macOS and Linux) | Clipboard copy and clearing outside Windows | Already on the system, so no Python dependency; called by absolute path with an argument list, never through a shell |
 | `textual` (CP3) | Full-screen TUI | Modern terminal UI on top of the same core |
 | Standard library: `secrets`, `getpass`, `json`, `os`, `pathlib` | CSPRNG, masked input, parsing, file I/O | No extra dependencies |
 
