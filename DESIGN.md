@@ -323,3 +323,59 @@ immutable and may be copied. This is handled as partial mitigation plus accepted
 
 Development and CI: `pytest`, `ruff`, `mypy`, `bandit` (static security analysis) and `pip-audit`
 (known vulnerabilities in dependencies). All dependency versions are pinned with hashes (T23, T24).
+
+## 6. As built
+
+Where the build differs from the design above, and why. The sections above are already updated to
+match; this log keeps the history of each change.
+
+| # | Date | Design said | As built | Why | Threats |
+|---|---|---|---|---|---|
+| D1 | 10 Oct 2026 | `copy` in Checkpoint 3 | `copy` in Checkpoint 2 | The CP2 brief requires an interface that never prints passwords. Without printing, the clipboard is the only way to use a stored password | T18, T25 |
+| D2 | 10 Oct 2026 | `show --reveal` prints the password | `--reveal` removed; `show` always masks | A printed password is on the screen and in the scrollback, which the brief forbids | T25 |
+| D3 | 10 Oct 2026 | `gen` prints the generated password | `gen` copies it to the clipboard. In `add` and `edit`, typing `gen` at the password prompt fills the entry instead | Same rule as D2 | T20, T25 |
+| D4 | 10 Oct 2026 | Clipboard through `pyperclip` | `pywin32` (`win32clipboard`) on Windows; `pbcopy`, `wl-copy` or `xclip` on macOS and Linux | `pyperclip` sets plain text only. Through `pywin32` the copy also carries the formats that keep it out of the Win+V history and the cloud clipboard. Outside Windows the system tools need no Python dependency | T18, T23 |
+| D5 | 10 Oct 2026 | "owner-only ACL on Windows", mechanism not chosen | `pywin32` creates the data directory and every file with a protected ACL that grants access to the current user only. At startup the ACL is read back and checked | `os.chmod` cannot restrict reading on Windows. Setting the ACL at creation leaves no moment when a file is readable by others, and the startup check catches a directory that someone else created or changed | T11, T12 |
+| D6 | 10 Oct 2026 | No platform named | Windows 10/11 is the primary platform (development and the demo); Linux is supported and tested in CI | Permissions and the clipboard work differently on each OS, so both code paths are built and tested | T12, T18 |
+| D7 | 10 Oct 2026 | — | New threat T25: a password read from the screen or the scrollback | It is the threat behind the "never prints passwords" rule and had no row of its own | T25 |
+
+### Brief requirements met in a different way
+
+| The project brief says (Projects.pdf §4.2) | How this project meets it |
+|---|---|
+| The master password is "stored securely with a hashing method such as bcrypt, never in plaintext" | Nothing derived from the master password is stored, not even a hash. Argon2id, a password-hashing function like bcrypt, derives the KEK, and a login succeeds only if that KEK unwraps the DEK, which AES-GCM authenticates (§4, *Login check*). Argon2id won the Password Hashing Competition and is OWASP's first choice: it is memory-hard, whereas bcrypt uses about 4 KiB of memory and is therefore cheaper to attack on GPUs. A stored bcrypt hash next to the vault would also give an attacker a second, weaker target than the Argon2id-protected key (T1) |
+| "Sensitive data such as passwords must be wiped from memory immediately after use" | Best effort only, because Python strings and bytes cannot be overwritten (T13). The session keeps the DEK in a `bytearray` that is zeroed on lock (#28), and every secret is kept alive as briefly as possible. The rest of the secure-memory work is Checkpoint 3 |
+
+## 7. Threat → code → test map
+
+Every threat from §3 with the issue that builds its mitigation, and the code and tests that implement
+and prove it. The pull request that implements a mitigation fills in its code and test cells;
+"—" means not built yet. Issue numbers refer to the GitHub issues of this repository.
+
+| Threat | Mitigation in short | Issue | Code | Tests |
+|---|---|---|---|---|
+| T1 offline brute force | Argon2id with a parameter floor; master-password policy | #16, #22, #26 | — | — |
+| T2 online guessing | KDF cost per attempt; delay doubling after each failure | #23 | — | — |
+| T3 password seen while typed | Masked input | #21 | — | — |
+| T4 username enumeration | One generic error; the KDF also runs for unknown usernames | #23 | — | — |
+| T5 recovery key stolen | 160-bit key shown once; using it forces a new password and key | #17, #22, #27 | — | — |
+| T6 vault read from disk | AES-256-GCM over the whole body; no plaintext on disk | #16, #20 | — | — |
+| T7 header tampering | Header authenticated as AAD; KDF floor enforced on load | #16, #20 | — | — |
+| T8 vaults swapped between users | Username bound into the AAD | #20, #23 | — | — |
+| T9 rollback | Counter inside the encrypted body, shown after unlock | #20, #23 | — | — |
+| T10 crash during save | Atomic write with a backup copy | #19 | — | — |
+| T11 path traversal, symlinks, hard links | Random file names, allow-lists, links and foreign-owned files refused | #18, #19, #22 | — | — |
+| T12 other OS users read files | Owner-only permissions set at creation | #18 | — | — |
+| T13 secrets read from memory | Short key lifetime; DEK zeroed on lock (best effort) | #28; CP3 | — | — |
+| T14 secrets in swap or crash dumps | Core dumps disabled where the OS allows | CP3 | — | — |
+| T15 unattended session | `lock` and 5-minute auto-lock | #28 | — | — |
+| T16 secrets in shell history | Secrets only through masked prompts, never as arguments | #21 | — | — |
+| T17 secrets in errors or logs | Generic errors, no tracebacks; logging in CP3 | #21; CP3 | — | — |
+| T18 clipboard | 20 s clear; Windows history exclusion; cleared on lock | #25, #28 | — | — |
+| T19 malicious input | Allow-lists, length limits, output sanitizer | #21, #24 | — | — |
+| T20 predictable generated passwords | `secrets` CSPRNG | #17, #25 | — | — |
+| T21 password and TOTP secret together | Same protection as the vault; accepted trade-off | CP3 | — | — |
+| T22 SSH key misused from the agent | Key passed via stdin; 10-minute lifetime | CP3 | — | — |
+| T23 malicious dependency | Few libraries, pinned; `pip-audit` and secret scanning in CI | #10, #14, #15 | `.github/workflows/ci.yml` (`pip-audit` step) | — |
+| T24 tampered install | Dependencies installed with `--require-hashes` | #15 | — | — |
+| T25 password read from the screen | Passwords never printed: `show` masks, `gen` and `copy` use the clipboard | #21, #24, #25 | — | — |
