@@ -8,7 +8,8 @@ also stores TOTP secrets and SSH private keys, so passwords, second factors and 
 around in plaintext files. A paper recovery key, shown once at registration, is the only way back
 in if the master password is forgotten.
 
-Design document: [DESIGN.md](DESIGN.md) (assets, architecture, threat model, crypto scheme).
+Design document: [DESIGN.md](DESIGN.md) (assets, architecture, threat model, crypto scheme,
+deviations as built, threat-to-code map). Progress notes per checkpoint: [PROGRESS.md](PROGRESS.md).
 
 ## Scope
 
@@ -106,5 +107,5 @@ The same checks run in CI on every pull request.
 | Checkpoint | Due | State |
 |---|---|---|
 | 1. Threat model and architecture | 25 Sep 2026 | Done: [DESIGN.md](DESIGN.md) |
-| 2. Core implemented | 30 Oct 2026 | Not started |
+| 2. Core implemented | 30 Oct 2026 | In progress: [PROGRESS.md](PROGRESS.md) |
 | 3. Near-final | 20 Nov 2026 | Not started |
