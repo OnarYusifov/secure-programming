@@ -3,8 +3,9 @@
 Implements the scheme in DESIGN.md §4:
 
 - the key-encryption key (KEK) is derived from the master password with Argon2id;
+- a second KEK is derived from the paper recovery key with HKDF-SHA256;
 - a random data key (DEK) encrypts the vault with AES-256-GCM;
-- the DEK is stored wrapped (encrypted) under the KEK.
+- the DEK is stored wrapped (encrypted) under each KEK.
 
 Every failure raises CryptoError without detail, so a caller cannot tell a wrong
 password from a tampered file (T4, T7, T8).
@@ -21,8 +22,10 @@ from dataclasses import dataclass
 from typing import NamedTuple, Self
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 KEY_BYTES = 32  # AES-256
 NONCE_BYTES = 12  # 96-bit GCM nonce
@@ -40,6 +43,12 @@ MIN_LANES = 4
 MAX_MEMORY_KIB = 1_048_576  # 1 GiB
 MAX_ITERATIONS = 64
 MAX_LANES = 16
+
+RECOVERY_KEY_BYTES = 20  # 160 bits, written down as 32 Base32 characters
+
+# HKDF "info" label. It ties the derived key to this one purpose and version, so
+# it can never equal a key derived from the same input for anything else.
+RECOVERY_KEK_INFO = b"yunarpass/recovery-kek/v1"
 
 type Key = bytes | bytearray
 
@@ -141,6 +150,22 @@ def derive_kek(password: str, params: KdfParams) -> bytearray:
     )
     kek = bytearray(KEY_BYTES)
     kdf.derive_into(secret, kek)
+    return kek
+
+
+def derive_recovery_kek(recovery_key: Key, salt: bytes) -> bytearray:
+    """Derive the 32-byte recovery KEK from the recovery key with HKDF-SHA256.
+
+    A slow KDF is not needed here: the recovery key is 160 random bits, so there
+    is no small set of likely values for an attacker to try first (T5).
+    """
+    if not isinstance(recovery_key, bytes | bytearray) or len(recovery_key) != RECOVERY_KEY_BYTES:
+        raise CryptoError
+    if not isinstance(salt, bytes) or len(salt) != SALT_BYTES:
+        raise CryptoError
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=KEY_BYTES, salt=salt, info=RECOVERY_KEK_INFO)
+    kek = bytearray(KEY_BYTES)
+    hkdf.derive_into(recovery_key, kek)
     return kek
 
 

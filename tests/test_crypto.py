@@ -1,9 +1,11 @@
-"""Tests for the encryption module (DESIGN.md §4; threats T1, T6, T7, T8, T13)."""
+"""Tests for the encryption module (DESIGN.md §4; threats T1, T5, T6, T7, T8, T13)."""
 
 import dataclasses
 
 import pytest
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from yunarpass import crypto
 from yunarpass.crypto import CryptoError, KdfParams
@@ -238,3 +240,57 @@ def test_wipe_zeroes_the_buffer_in_place() -> None:
 
 def test_new_keys_are_random() -> None:
     assert crypto.new_key() != crypto.new_key()
+
+
+# --- Recovery KEK (T5) -------------------------------------------------------------
+
+RECOVERY_KEY = bytes(range(20))
+RECOVERY_SALT = bytes(range(100, 116))
+# Our own known answer, cross-checked with an HKDF written from hmac/hashlib.
+# Changing the info label or the length would break every existing recovery key.
+RECOVERY_KNOWN_ANSWER = "bd48d885476a11b2e9f2d8af7f3c65faae12979daee221e0b49055b3a9de57bf"
+# RFC 5869, test case 1.
+RFC5869_OKM = "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+
+
+def test_hkdf_matches_rfc5869_vector() -> None:
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(), length=42, salt=bytes(range(13)), info=bytes(range(0xF0, 0xFA))
+    )
+    assert hkdf.derive(b"\x0b" * 22).hex() == RFC5869_OKM
+
+
+def test_recovery_kek_known_answer() -> None:
+    kek = crypto.derive_recovery_kek(RECOVERY_KEY, RECOVERY_SALT)
+    assert isinstance(kek, bytearray)
+    assert kek.hex() == RECOVERY_KNOWN_ANSWER
+
+
+def test_recovery_kek_depends_on_key_and_salt() -> None:
+    kek = crypto.derive_recovery_kek(RECOVERY_KEY, RECOVERY_SALT)
+    assert crypto.derive_recovery_kek(bytes(20), RECOVERY_SALT) != kek
+    assert crypto.derive_recovery_kek(RECOVERY_KEY, bytes(16)) != kek
+    assert crypto.derive_recovery_kek(bytearray(RECOVERY_KEY), RECOVERY_SALT) == kek
+
+
+@pytest.mark.parametrize(
+    ("key", "salt"),
+    [
+        (bytes(19), RECOVERY_SALT),
+        (bytes(21), RECOVERY_SALT),
+        ("k" * 20, RECOVERY_SALT),
+        (RECOVERY_KEY, bytes(15)),
+        (RECOVERY_KEY, bytearray(16)),
+    ],
+)
+def test_recovery_kek_refuses_wrong_sizes(key: bytes, salt: bytes) -> None:
+    with pytest.raises(CryptoError):
+        crypto.derive_recovery_kek(key, salt)
+
+
+def test_recovery_kek_unwraps_the_same_dek_as_the_password() -> None:
+    # The scheme: one DEK, wrapped once under each KEK (DESIGN.md §4).
+    dek = crypto.new_key()
+    rk_kek = crypto.derive_recovery_kek(RECOVERY_KEY, RECOVERY_SALT)
+    sealed = crypto.wrap_dek(rk_kek, dek, AAD)
+    assert crypto.unwrap_dek(rk_kek, sealed.nonce, sealed.ct, AAD) == dek
