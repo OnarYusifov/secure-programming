@@ -26,8 +26,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "S", "SIM", "PTH"]
-# S101: assert is fine in tests
-per-file-ignores = { "tests/*" = ["S101"] }
+# Tests: assert is fine (S101), and fixtures use throwaway passwords (S105, S106)
+per-file-ignores = { "tests/*" = ["S101", "S105", "S106"] }
 
 [tool.mypy]
 python_version = "3.12"
