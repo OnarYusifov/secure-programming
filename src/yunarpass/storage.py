@@ -7,14 +7,20 @@
 - A read refuses links, hard links, files that are not private to this user and
   oversized files, and checks that the file it opened is the file it checked:
   lstat, then open, then fstat, then compare (T11, the TOCTOU pattern).
+- A write is atomic. The new content goes to a private temporary file in the
+  same directory, which is flushed, synced to disk and renamed over the target.
+  There is a complete file at the target name at every moment, and the previous
+  version is kept as <name>.bak (T10).
 
 Errors are StorageError or its subclass UnsafeFileError. Their messages are
 fixed and contain no path (T17).
 """
 
+import contextlib
 import errno
 import os
 import re
+import secrets
 import stat
 import sys
 from collections.abc import Mapping
@@ -24,9 +30,14 @@ from yunarpass import fsperm
 from yunarpass.fsperm import StorageError as StorageError
 from yunarpass.fsperm import UnsafeFileError as UnsafeFileError
 
+if sys.platform == "win32":
+    import pywintypes
+    import win32file
+
 HOME_ENV = "YUNARPASS_HOME"
 DEFAULT_DIR_NAME = ".yunarpass"
 USERS_FILE = "users.json"
+BACKUP_SUFFIX = ".bak"
 
 # Far above any real vault, which is a few hundred KiB even with thousands of
 # entries. It stops a planted multi-gigabyte file from exhausting memory.
@@ -116,6 +127,46 @@ def _read_private(path: Path) -> bytes | None:
         os.close(fd)
 
 
+def _rename_over(temp: Path, target: Path) -> None:
+    """Atomically replace target with temp, and make the rename itself durable."""
+    if sys.platform == "win32":
+        try:
+            win32file.MoveFileEx(
+                str(temp),
+                str(target),
+                # WRITE_THROUGH: return only once the rename is on the disk.
+                win32file.MOVEFILE_REPLACE_EXISTING | win32file.MOVEFILE_WRITE_THROUGH,
+            )
+        except pywintypes.error as error:
+            raise OSError(0, error.strerror, None, error.winerror) from None
+    else:
+        temp.replace(target)
+        # The rename is a change to the directory, which needs its own fsync.
+        fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _replace(directory: Path, name: str, data: bytes) -> None:
+    """Write data to a private temporary file, then rename it over directory/name."""
+    # A random name: a temporary file left behind by a crash never blocks a
+    # later save. It holds only ciphertext and is private like any other file.
+    temp = directory / f".{name}.{secrets.token_hex(8)}.tmp"
+    fd = fsperm.create_private_file(temp)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())  # the content is on the disk before the rename
+        _rename_over(temp, directory / name)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temp.unlink()
+        raise
+
+
 class DataDir:
     """The data directory, after it has been created or checked. Use DataDir.open()."""
 
@@ -149,3 +200,22 @@ class DataDir:
             return _read_private(path)
         except OSError:
             raise StorageError("a data file could not be read") from None
+
+    def write(self, name: str, data: bytes) -> None:
+        """Replace a data file atomically and keep its previous version as name.bak.
+
+        A crash at any point leaves a complete file at the target name: the old
+        version before the final rename, the new one after it.
+        """
+        path = self._file(name, backup_allowed=False)
+        if len(data) > MAX_FILE_BYTES:
+            raise StorageError("a data file is too large")
+        try:
+            # Read the current version with all the checks, so that a link
+            # planted at the target name is refused rather than replaced.
+            previous = _read_private(path)
+            if previous is not None:
+                _replace(self.path, name + BACKUP_SUFFIX, previous)
+            _replace(self.path, name, data)
+        except OSError:
+            raise StorageError("a data file could not be written") from None

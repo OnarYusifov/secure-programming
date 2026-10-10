@@ -1,5 +1,6 @@
 """Tests for the storage layer (threats T10, T11, T12, T17)."""
 
+import errno
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from yunarpass import fsperm, storage
-from yunarpass.storage import DataDir, StorageError, UnsafeFileError
+from yunarpass.storage import BACKUP_SUFFIX, DataDir, StorageError, UnsafeFileError
 
 USERS = storage.USERS_FILE
 VAULT = storage.vault_file_name("0123456789abcdef0123456789abcdef")
@@ -31,6 +32,10 @@ def symlink_or_skip(link: Path, target: Path) -> None:
         link.symlink_to(target)
     except OSError:
         pytest.skip("creating symlinks needs Developer Mode or administrator rights")
+
+
+def leftovers(data_dir: DataDir) -> list[str]:
+    return sorted(path.name for path in data_dir.path.iterdir() if path.suffix == ".tmp")
 
 
 # --- Where the data directory is ------------------------------------------------
@@ -108,11 +113,21 @@ def test_vault_file_name() -> None:
 def test_names_off_the_allow_list_are_refused(data_dir: DataDir, name: str) -> None:
     with pytest.raises(ValueError, match="not an allowed"):
         data_dir.read(name)
+    with pytest.raises(ValueError, match="not an allowed"):
+        data_dir.write(name, b"x")
 
 
 def test_an_absolute_path_is_not_a_name(data_dir: DataDir) -> None:
     with pytest.raises(ValueError, match="not an allowed"):
         data_dir.read(str(data_dir.path / USERS))
+
+
+def test_a_backup_can_be_read_but_not_written(data_dir: DataDir) -> None:
+    assert data_dir.read(USERS + BACKUP_SUFFIX) is None
+    place_private_file(data_dir, USERS + BACKUP_SUFFIX, b"{}")
+    assert data_dir.read(USERS + BACKUP_SUFFIX) == b"{}"
+    with pytest.raises(ValueError, match="not an allowed"):
+        data_dir.write(USERS + BACKUP_SUFFIX, b"x")
 
 
 # --- Reading (T11, T12) -------------------------------------------------------------
@@ -129,10 +144,19 @@ def test_read_returns_the_exact_bytes(data_dir: DataDir) -> None:
     assert data_dir.read(VAULT) == content
 
 
-def test_a_backup_can_be_read(data_dir: DataDir) -> None:
-    assert data_dir.read(USERS + ".bak") is None
-    place_private_file(data_dir, USERS + ".bak", b"{}")
-    assert data_dir.read(USERS + ".bak") == b"{}"
+def test_write_then_read_returns_the_same_bytes(data_dir: DataDir) -> None:
+    content = bytes(range(256)) * 4  # every byte value, including CR, LF and Ctrl-Z
+    data_dir.write(VAULT, content)
+    assert data_dir.read(VAULT) == content
+
+
+def test_a_written_file_is_private(data_dir: DataDir) -> None:
+    data_dir.write(USERS, b"{}")
+    fd = os.open(data_dir.path / USERS, os.O_RDONLY)
+    try:
+        fsperm.check_private_fd(fd)
+    finally:
+        os.close(fd)
 
 
 def test_a_symlink_is_refused(data_dir: DataDir, tmp_path: Path) -> None:
@@ -141,6 +165,9 @@ def test_a_symlink_is_refused(data_dir: DataDir, tmp_path: Path) -> None:
     symlink_or_skip(data_dir.path / USERS, target)
     with pytest.raises(UnsafeFileError, match="link"):
         data_dir.read(USERS)
+    with pytest.raises(UnsafeFileError, match="link"):
+        data_dir.write(USERS, b"new")
+    assert target.read_bytes() == b"planted"  # neither read through nor overwritten
 
 
 def test_a_hard_link_is_refused(data_dir: DataDir) -> None:
@@ -199,3 +226,93 @@ def test_a_file_that_grows_after_the_check_is_cut_off(data_dir: DataDir) -> None
             storage._read_at_most(fd, 16)
     finally:
         os.close(fd)
+
+
+# --- Atomic writes with a backup (T10) ------------------------------------------------
+
+
+def test_the_first_write_makes_no_backup(data_dir: DataDir) -> None:
+    data_dir.write(USERS, b"v1")
+    assert data_dir.read(USERS + BACKUP_SUFFIX) is None
+
+
+def test_the_backup_holds_the_previous_version(data_dir: DataDir) -> None:
+    for version in (b"v1", b"v2", b"v3"):
+        data_dir.write(USERS, version)
+    assert data_dir.read(USERS) == b"v3"
+    assert data_dir.read(USERS + BACKUP_SUFFIX) == b"v2"  # read() checks it like any file
+    assert leftovers(data_dir) == []
+
+
+def test_an_oversized_write_is_refused_and_changes_nothing(
+    data_dir: DataDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir.write(USERS, b"v1")
+    monkeypatch.setattr(storage, "MAX_FILE_BYTES", 16)
+    with pytest.raises(StorageError, match="too large"):
+        data_dir.write(USERS, bytes(17))
+    assert data_dir.read(USERS) == b"v1"
+
+
+@pytest.mark.parametrize("fail_at", range(1, 7))
+def test_a_crash_at_any_step_leaves_a_complete_file(
+    data_dir: DataDir, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail_at: int
+) -> None:
+    # Steps of a write over an existing file: sync and rename the backup, then
+    # sync and rename the new version (plus a directory sync per rename on
+    # POSIX). Failing at each one in turn must leave the old or the new file at
+    # the target name, never a mixture and never nothing.
+    data_dir.write(USERS, b"old version")
+    real_fsync, real_rename_over = os.fsync, storage._rename_over
+    steps = 0
+
+    def step() -> None:
+        nonlocal steps
+        steps += 1
+        if steps == fail_at:
+            raise OSError(errno.EIO, "simulated crash")
+
+    def fsync(fd: int) -> None:
+        step()
+        real_fsync(fd)
+
+    def rename_over(temp: Path, target: Path) -> None:
+        step()
+        real_rename_over(temp, target)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(storage, "_rename_over", rename_over)
+    try:
+        data_dir.write(USERS, b"new version")
+    except StorageError as error:
+        assert str(tmp_path) not in str(error)  # T17
+    monkeypatch.undo()
+
+    current = data_dir.read(USERS)
+    assert current in (b"old version", b"new version")
+    if current == b"new version":
+        assert data_dir.read(USERS + BACKUP_SUFFIX) == b"old version"
+    assert leftovers(data_dir) == []
+
+
+def test_an_interrupted_write_cleans_up_and_keeps_the_old_file(
+    data_dir: DataDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir.write(USERS, b"old version")
+
+    def interrupted(temp: Path, target: Path) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(storage, "_rename_over", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        data_dir.write(USERS, b"new version")
+    monkeypatch.undo()
+    assert data_dir.read(USERS) == b"old version"
+    assert leftovers(data_dir) == []
+
+
+def test_rename_over_a_directory_fails(data_dir: DataDir) -> None:
+    temp = place_private_file(data_dir, USERS, b"x")
+    (data_dir.path / VAULT).mkdir()
+    with pytest.raises(OSError):
+        storage._rename_over(temp, data_dir.path / VAULT)
