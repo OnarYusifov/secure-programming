@@ -322,7 +322,8 @@ immutable and may be copied. This is handled as partial mitigation plus accepted
 | `textual` (CP3) | Full-screen TUI | Modern terminal UI on top of the same core |
 | Standard library: `secrets`, `getpass`, `json`, `os`, `pathlib` | CSPRNG, masked input, parsing, file I/O | No extra dependencies |
 
-Development and CI: `pytest` with `pytest-cov` (branch coverage, at least 80%), `ruff`, `mypy`,
+Development and CI: `pytest` with `pytest-cov` (branch coverage, at least 80% over the Windows and
+Linux runs combined, since each OS runs code the other cannot), `ruff`, `mypy`,
 `bandit` (static security analysis), `pip-audit` (known vulnerabilities in dependencies) and
 `gitleaks` (secrets committed by mistake, searched in every commit, not just the latest). Type
 checks and tests run on Ubuntu and Windows with Python 3.12 and 3.14, because file permissions,

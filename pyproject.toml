@@ -40,6 +40,9 @@ testpaths = ["tests"]
 [tool.coverage.run]
 source_pkgs = ["yunarpass"]
 branch = true
+# Paths relative to the checkout, so that CI can combine the data recorded on
+# Windows and on Linux.
+relative_files = true
 
 [tool.coverage.report]
 fail_under = 80

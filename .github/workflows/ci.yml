@@ -106,8 +106,51 @@ jobs:
       - name: Type-check (mypy)
         run: mypy
 
-      - name: Tests with coverage (pytest, at least 80%)
-        run: pytest -q --cov
+      # Each OS runs code the other cannot (Windows ACLs, POSIX modes), so the
+      # 80% floor is checked once, on the data of all four runs combined, in
+      # the coverage job.
+      - name: Tests with coverage (pytest)
+        run: pytest -q --cov --cov-fail-under=0
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.os }}-py${{ matrix.python }}
+
+      - name: Keep the coverage data for the coverage job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.os }}-py${{ matrix.python }}
+          path: .coverage.${{ matrix.os }}-py${{ matrix.python }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  coverage:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install coverage
+        run: |
+          python -m pip install --upgrade pip
+          pip install coverage
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      # relative_files (pyproject.toml) lets coverage match the Windows paths
+      # (src\yunarpass\...) to the Linux ones.
+      - name: Combine Windows and Linux coverage (at least 80%)
+        run: |
+          coverage combine
+          coverage report
 
   # Follows the README's build-and-run block for the OS, line by line, on a
   # runner that has nothing but Python: no pip cache, no dev tools.
@@ -143,7 +186,7 @@ jobs:
   # only need to be listed here.
   ci-ok:
     if: always()
-    needs: [checks, secrets, tests, readme-smoke]
+    needs: [checks, secrets, tests, coverage, readme-smoke]
     runs-on: ubuntu-latest
     steps:
       - name: All required jobs passed
@@ -151,10 +194,12 @@ jobs:
           CHECKS: ${{ needs.checks.result }}
           SECRETS: ${{ needs.secrets.result }}
           TESTS: ${{ needs.tests.result }}
+          COVERAGE: ${{ needs.coverage.result }}
           README_SMOKE: ${{ needs.readme-smoke.result }}
         run: |
-          echo "checks: $CHECKS, secrets: $SECRETS, tests: $TESTS, readme-smoke: $README_SMOKE"
+          echo "checks: $CHECKS, secrets: $SECRETS, tests: $TESTS, coverage: $COVERAGE, readme-smoke: $README_SMOKE"
           test "$CHECKS" = success
           test "$SECRETS" = success
           test "$TESTS" = success
+          test "$COVERAGE" = success
           test "$README_SMOKE" = success

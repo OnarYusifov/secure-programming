@@ -133,6 +133,8 @@ pytest --cov
 ```
 
 `pytest --cov` measures branch coverage and fails below 80%; plain `pytest` skips the measurement.
+Locally it counts the other OS's code (Windows ACLs, POSIX modes) as not covered; CI applies the
+80% floor to the Windows and Linux runs combined.
 
 To change a runtime dependency, edit `requirements.in` and regenerate the lock file on Windows, so
 the Windows-only `pywin32` pin keeps its marker:
@@ -143,9 +145,10 @@ python -m piptools compile --generate-hashes --allow-unsafe --strip-extras --no-
 
 The same checks run in CI on every pull request and every push to `main`: lint and security scans
 once, a [gitleaks](https://github.com/gitleaks/gitleaks) secret scan over the whole git history,
-and type checks and tests on Ubuntu and Windows with Python 3.12 and 3.14. The `ci-ok` job passes
-only when all of them pass, and `main` requires it. With gitleaks installed, the secret scan runs
-locally as `gitleaks git --redact .`.
+type checks and tests on Ubuntu and Windows with Python 3.12 and 3.14, and a coverage job that
+combines the four test runs and checks the 80% floor. The `ci-ok` job passes only when all of them
+pass, and `main` requires it. With gitleaks installed, the secret scan runs locally as
+`gitleaks git --redact .`.
 
 ## Status
 
