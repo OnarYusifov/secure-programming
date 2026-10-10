@@ -80,22 +80,47 @@ and the demo; Linux is also supported and tested in CI.
 - For `ssh-load` (Checkpoint 3): OpenSSH with a running `ssh-agent` (on Windows: the *OpenSSH
   Authentication Agent* service).
 
-```sh
+Every dependency is installed from `requirements.txt` with `--require-hashes`, so pip refuses any
+file whose SHA-256 differs from the pinned one. The program itself is then installed with
+`--no-deps --no-build-isolation`, so that step downloads nothing: it builds with the hash-checked
+`setuptools` installed just before.
+
+Windows (PowerShell or Command Prompt):
+
+<!-- readme-smoke: windows -->
+```powershell
 git clone https://github.com/OnarYusifov/secure-programming.git
 cd secure-programming
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux / macOS
-pip install --require-hashes -r requirements.txt
-python -m yunarpass
+.venv\Scripts\python -m pip install --require-hashes -r requirements.txt
+.venv\Scripts\python -m pip install --no-deps --no-build-isolation .
+.venv\Scripts\python -m yunarpass
 ```
+
+Linux and macOS:
+
+<!-- readme-smoke: posix -->
+```sh
+git clone https://github.com/OnarYusifov/secure-programming.git
+cd secure-programming
+python3 -m venv .venv
+.venv/bin/python -m pip install --require-hashes -r requirements.txt
+.venv/bin/python -m pip install --no-deps --no-build-isolation .
+.venv/bin/python -m yunarpass
+```
+
+The commands call the virtual environment's Python directly, so no activation script is needed.
+CI runs these blocks verbatim on fresh Windows and Linux machines on every change (`readme-smoke`).
 
 Data is stored in `~/.yunarpass/` (override with the `YUNARPASS_HOME` environment variable).
 The directory and every file in it are created readable by the owner only.
 
-Development:
+Development, with the virtual environment activated (`.venv\Scripts\activate` on Windows,
+`source .venv/bin/activate` elsewhere; if PowerShell refuses to run the script, allow it once with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`):
 
 ```sh
+pip install --require-hashes -r requirements.txt
 pip install -r requirements-dev.txt
 pip install -e .
 ruff check .
@@ -105,6 +130,13 @@ pytest --cov
 ```
 
 `pytest --cov` measures branch coverage and fails below 80%; plain `pytest` skips the measurement.
+
+To change a runtime dependency, edit `requirements.in` and regenerate the lock file on Windows, so
+the Windows-only `pywin32` pin keeps its marker:
+
+```sh
+python -m piptools compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url requirements.in
+```
 
 The same checks run in CI on every pull request and every push to `main`: lint and security scans
 once, a [gitleaks](https://github.com/gitleaks/gitleaks) secret scan over the whole git history,
