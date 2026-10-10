@@ -13,11 +13,15 @@ password from a tampered file (T4, T7, T8).
 import secrets
 import unicodedata
 from dataclasses import dataclass
-from typing import Self
+from typing import NamedTuple, Self
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
 KEY_BYTES = 32  # AES-256
+NONCE_BYTES = 12  # 96-bit GCM nonce
+TAG_BYTES = 16
 SALT_BYTES = 16
 
 # Argon2id floor: the second recommended option of RFC 9106. These are constants
@@ -31,6 +35,8 @@ MIN_LANES = 4
 MAX_MEMORY_KIB = 1_048_576  # 1 GiB
 MAX_ITERATIONS = 64
 MAX_LANES = 16
+
+type Key = bytes | bytearray
 
 
 class CryptoError(Exception):
@@ -74,6 +80,37 @@ class KdfParams:
         return cls(MIN_MEMORY_KIB, MIN_ITERATIONS, MIN_LANES, secrets.token_bytes(SALT_BYTES))
 
 
+class Sealed(NamedTuple):
+    """Output of encrypt(): the nonce, and the ciphertext with the tag appended."""
+
+    nonce: bytes
+    ct: bytes
+
+
+def _check_key(key: Key) -> None:
+    if not isinstance(key, bytes | bytearray) or len(key) != KEY_BYTES:
+        raise CryptoError
+
+
+def _check_aad(aad: bytes) -> None:
+    # Every encryption in the scheme is bound to a header. Empty associated data
+    # would mean a caller forgot it, so it is refused rather than allowed.
+    if not isinstance(aad, bytes) or not aad:
+        raise CryptoError
+
+
+def _check_sealed(nonce: bytes, ct: bytes) -> None:
+    if not isinstance(nonce, bytes) or len(nonce) != NONCE_BYTES:
+        raise CryptoError
+    if not isinstance(ct, bytes) or len(ct) < TAG_BYTES:
+        raise CryptoError
+
+
+def new_key() -> bytearray:
+    """Return a fresh random 256-bit key (a DEK) from the OS CSPRNG."""
+    return bytearray(secrets.token_bytes(KEY_BYTES))
+
+
 def derive_kek(password: str, params: KdfParams) -> bytearray:
     """Derive the 32-byte KEK from a master password with Argon2id.
 
@@ -95,3 +132,22 @@ def derive_kek(password: str, params: KdfParams) -> bytearray:
     kek = bytearray(KEY_BYTES)
     kdf.derive_into(secret, kek)
     return kek
+
+
+def encrypt(key: Key, plaintext: bytes | bytearray, aad: bytes) -> Sealed:
+    """Encrypt and authenticate with AES-256-GCM under a fresh random nonce."""
+    _check_key(key)
+    _check_aad(aad)
+    nonce = secrets.token_bytes(NONCE_BYTES)
+    return Sealed(nonce, AESGCM(key).encrypt(nonce, plaintext, aad))
+
+
+def decrypt(key: Key, nonce: bytes, ct: bytes, aad: bytes) -> bytes:
+    """Verify and decrypt. Any wrong key, nonce, ciphertext or AAD raises CryptoError."""
+    _check_key(key)
+    _check_aad(aad)
+    _check_sealed(nonce, ct)
+    try:
+        return AESGCM(key).decrypt(nonce, ct, aad)
+    except InvalidTag:
+        raise CryptoError from None
