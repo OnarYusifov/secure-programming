@@ -184,7 +184,7 @@ flowchart LR
 | ID | Misuse case (misuser) | Threatens | Risk | Mitigation | Residual risk |
 |---|---|---|---|---|---|
 | T6 | Read the vault file from the disk or a backup (M1) | UC3 | High | The whole vault is encrypted with authenticated encryption (AEAD); plaintext is never written to disk, not even to temp files | Depends on T1 (password strength) |
-| T7 | Tamper with the vault, e.g. weaken the KDF parameters in the header (M1, M2) | UC2, UC3 | Medium | The header is authenticated as associated data; KDF parameters below a minimum hard-coded in the program are rejected when loading, and configuration can only raise them | None significant |
+| T7 | Tamper with the vault, e.g. weaken the KDF parameters in the header (M1, M2) | UC2, UC3 | Medium | The header is authenticated as associated data; KDF parameters below a minimum hard-coded in the program are rejected when loading, and configuration can only raise them. Parameters above a hard-coded maximum are rejected too, so an edited header cannot make the program exhaust memory before the check fails | None significant |
 | T8 | Swap vault files between users or edit `users.json` (M2) | UC2 | Medium | The username is bound to the vault as associated data, so a swapped vault fails to decrypt | None significant |
 | T9 | Roll the vault back to an older copy (M1, M2) | UC3 | Low | A version counter inside the encrypted vault is shown to the user after unlock | Not fully preventable locally: the attacker can roll back every file at once. Accepted |
 | T10 | Crash or power loss during a save corrupts the vault (availability) | UC3 | Medium | Atomic save: write a temp file, flush it, then rename; the previous encrypted copy is kept as a backup | Disk failure; users are told to back up the vault file |
@@ -195,7 +195,7 @@ flowchart LR
 
 | ID | Misuse case (misuser) | Threatens | Risk | Mitigation | Residual risk |
 |---|---|---|---|---|---|
-| T13 | Read secrets from the process memory (M3) | UC2, UC3 | Medium | Secrets are kept alive as briefly as possible: the password and KEK are dropped right after the DEK is unwrapped, and the DEK is dropped on lock. Wiping is best-effort only | Python `str`/`bytes` are immutable, and the crypto library takes keys as `bytes`, so copies that cannot be overwritten always exist. Wiping cannot be guaranteed; only the lifetime is controlled. Malware running as the user is ultimately out of scope (see Assumptions) |
+| T13 | Read secrets from the process memory (M3) | UC2, UC3 | Medium | Secrets are kept alive as briefly as possible: the password and KEK are dropped right after the DEK is unwrapped, and the DEK is dropped on lock. The KEK and the DEK are written by the library straight into `bytearray` buffers (`derive_into`, `decrypt_into`), which are zeroed when no longer needed, so these keys never exist as immutable `bytes` in Python. Wiping is best-effort only | Python `str` is immutable, so the master password itself cannot be overwritten, and the library may keep internal copies of keys. Wiping cannot be guaranteed; only the lifetime is controlled. Malware running as the user is ultimately out of scope (see Assumptions) |
 | T14 | Secrets written to disk through the pagefile, swap or a crash dump (M1) | UC2 | Low | Core dumps disabled where the OS allows it; secrets kept in memory only briefly | The Windows pagefile cannot be controlled from Python. Accepted |
 | T15 | Use an unlocked session left unattended (M2, M4) | UC3 | Medium | Auto-lock after 5 minutes of inactivity; `lock` command; keys discarded on lock | Within the timeout window |
 
@@ -240,8 +240,8 @@ recovery key   --HKDF-SHA256(salt)----> KEK_rk --AES-256-GCM wrap--+
 
 | Element | Choice | Why (threat) |
 |---|---|---|
-| Password KDF | **Argon2id**, 64 MiB memory, 3 iterations, 4 lanes, 16-byte random salt, 32-byte output (RFC 9106 recommended profile) | Slow and memory-hard, so offline guessing on GPUs is expensive (T1). The salt defeats precomputed tables |
-| Parameter floor | The minimums above are constants in the code; a vault header with weaker parameters is refused | T7: an attacker cannot make brute force cheaper by editing the header or a config file |
+| Password KDF | **Argon2id**, 64 MiB memory, 3 iterations, 4 lanes, 16-byte random salt, 32-byte output (RFC 9106 recommended profile). The password is Unicode-normalized (NFC) and UTF-8 encoded first | Slow and memory-hard, so offline guessing on GPUs is expensive (T1). The salt defeats precomputed tables. NFC makes the same password typed with composed or decomposed accents give the same key |
+| Parameter floor and ceiling | The minimums above are constants in the code; a vault header with weaker parameters is refused. A maximum (1 GiB, 64 iterations, 16 lanes) is enforced the same way | T7: an attacker cannot make brute force cheaper by editing the header or a config file, nor make the program allocate unbounded memory before the tag check can fail |
 | Data key (DEK) | 256 random bits from the OS CSPRNG (`secrets`) | Independent of the password, so changing the password only re-wraps the DEK (UC7) |
 | Encryption | **AES-256-GCM** (authenticated encryption, AEAD) for the vault body and for each wrapped DEK | Confidentiality (T6) and integrity: any modified byte makes decryption fail (T7, T8) |
 | Nonces | A fresh random 96-bit nonce for every encryption, including every save | A nonce must never repeat under the same key. With random nonces, the safe limit (about 2^32 encryptions per key) is far beyond our save volume |
@@ -297,6 +297,7 @@ written atomically in the same way as the vault, so two registrations cannot cor
 |---|---|
 | Master password | at least 12 characters, not in the 10 000-most-common blocklist |
 | Argon2id floor | 64 MiB, 3 iterations, 4 lanes |
+| Argon2id ceiling | 1 GiB, 64 iterations, 16 lanes |
 | Login delay | 1 s after the first failure, doubling |
 | Auto-lock | 5 minutes idle |
 | Clipboard clear | 20 seconds |
@@ -342,6 +343,8 @@ match; this log keeps the history of each change.
 | D5 | 10 Oct 2026 | "owner-only ACL on Windows", mechanism not chosen | `pywin32` creates the data directory and every file with a protected ACL that grants access to the current user only. At startup the ACL is read back and checked | `os.chmod` cannot restrict reading on Windows. Setting the ACL at creation leaves no moment when a file is readable by others, and the startup check catches a directory that someone else created or changed | T11, T12 |
 | D6 | 10 Oct 2026 | No platform named | Windows 10/11 is the primary platform (development and the demo); Linux is supported and tested in CI | Permissions and the clipboard work differently on each OS, so both code paths are built and tested | T12, T18 |
 | D7 | 10 Oct 2026 | — | New threat T25: a password read from the screen or the scrollback | It is the threat behind the "never prints passwords" rule and had no row of its own | T25 |
+| D8 | 10 Oct 2026 | Only a minimum for the Argon2id parameters | A maximum as well: 1 GiB, 64 iterations, 16 lanes | Without it, an edited header could ask for terabytes of memory or hours of hashing, and the program would try before the authentication tag can fail (availability) | T7 |
+| D9 | 10 Oct 2026 | "Only the lifetime is controlled" for keys in memory | The KEK and the DEK are written straight into `bytearray` buffers that are zeroed after use; a failed unwrap zeroes its buffer at once | `cryptography` ≥ 47 can derive and decrypt into a caller's buffer, so these two keys never exist as immutable `bytes` in Python. The master password (a `str`) still cannot be wiped | T13 |
 
 ### Brief requirements met in a different way
 
@@ -358,19 +361,19 @@ and prove it. The pull request that implements a mitigation fills in its code an
 
 | Threat | Mitigation in short | Issue | Code | Tests |
 |---|---|---|---|---|
-| T1 offline brute force | Argon2id with a parameter floor; master-password policy | #16, #22, #26 | — | — |
+| T1 offline brute force | Argon2id with a parameter floor; master-password policy | #16, #22, #26 | `crypto.py`: `KdfParams`, `derive_kek` | `test_crypto.py`: `test_argon2id_matches_rfc9106_vector`, `test_derive_kek_known_answer`, `test_kdf_params_new_uses_the_floor_and_a_fresh_salt` |
 | T2 online guessing | KDF cost per attempt; delay doubling after each failure | #23 | — | — |
 | T3 password seen while typed | Masked input | #21 | — | — |
 | T4 username enumeration | One generic error; the KDF also runs for unknown usernames | #23 | — | — |
 | T5 recovery key stolen | 160-bit key shown once; using it forces a new password and key | #17, #22, #27 | — | — |
-| T6 vault read from disk | AES-256-GCM over the whole body; no plaintext on disk | #16, #20 | — | — |
-| T7 header tampering | Header authenticated as AAD; KDF floor enforced on load | #16, #20 | — | — |
-| T8 vaults swapped between users | Username bound into the AAD | #20, #23 | — | — |
+| T6 vault read from disk | AES-256-GCM over the whole body; no plaintext on disk | #16, #20 | `crypto.py`: `encrypt`, `decrypt` | `test_crypto.py`: `test_encrypt_decrypt_round_trip`, `test_decrypt_with_wrong_key_fails`, `test_nonces_are_unique` |
+| T7 header tampering | Header authenticated as AAD; KDF floor and ceiling enforced on load | #16, #20 | `crypto.py`: `KdfParams.check`, AAD in `encrypt`/`decrypt`/`unwrap_dek` | `test_crypto.py`: `test_kdf_params_outside_limits_are_refused`, `test_derive_kek_rechecks_params`, `test_changed_associated_data_fails`, `test_flipped_ciphertext_bit_fails` |
+| T8 vaults swapped between users | Username bound into the AAD | #16, #20, #23 | `crypto.py`: AAD is required and non-empty | `test_crypto.py`: `test_changed_associated_data_fails` (other username), `test_empty_associated_data_is_refused` |
 | T9 rollback | Counter inside the encrypted body, shown after unlock | #20, #23 | — | — |
 | T10 crash during save | Atomic write with a backup copy | #19 | — | — |
 | T11 path traversal, symlinks, hard links | Random file names, allow-lists, links and foreign-owned files refused | #18, #19, #22 | — | — |
 | T12 other OS users read files | Owner-only permissions set at creation | #18 | — | — |
-| T13 secrets read from memory | Short key lifetime; DEK zeroed on lock (best effort) | #28; CP3 | — | — |
+| T13 secrets read from memory | Short key lifetime; keys in wipeable buffers; DEK zeroed on lock (best effort) | #16, #28; CP3 | `crypto.py`: `derive_kek`/`unwrap_dek` return `bytearray`, `wipe` | `test_crypto.py`: `test_wipe_zeroes_the_buffer_in_place`, `test_wrap_unwrap_round_trip` |
 | T14 secrets in swap or crash dumps | Core dumps disabled where the OS allows | CP3 | — | — |
 | T15 unattended session | `lock` and 5-minute auto-lock | #28 | — | — |
 | T16 secrets in shell history | Secrets only through masked prompts, never as arguments | #21 | — | — |
