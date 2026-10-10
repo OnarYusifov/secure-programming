@@ -4,16 +4,25 @@ parse() checks a whole vault file before any cryptography runs: exact field
 sets, no duplicate keys, exact JSON types (a bool is not an int), canonical
 Base64 with exact decoded lengths, a size cap, and the Argon2id floor and
 ceiling (T7, T19). serialize() writes the same format back.
+
+Associated data (AAD). Every encryption in the file is bound to the vault's
+identity, its format version, vault_id and username, so a vault renamed to
+another user, or swapped into another user's place, does not decrypt (T8). Each
+copy of the DEK is also bound to its own key-derivation inputs: the password
+copy to the Argon2id parameters and salt, the recovery copy to its HKDF salt
+(T7). Changing the password therefore re-wraps only the password copy, and the
+recovery copy and the body stay valid (DESIGN.md §6, D10).
 """
 
 import base64
 import json
 import re
+import secrets
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from yunarpass import crypto
-from yunarpass.crypto import KdfParams, Sealed
+from yunarpass.crypto import KdfParams, Key, Sealed
 
 FORMAT_VERSION = 1
 KDF_ALGORITHM = "argon2id"
@@ -167,6 +176,31 @@ class Header:
         ):
             raise VaultFormatError("recovery salt: wrong length")
 
+    def _aad(self, purpose: str, **extra: object) -> bytes:
+        # Canonical JSON: sorted keys, no spaces, ASCII only. Every value is
+        # validated, so the same header always gives the same bytes. "aad"
+        # names the purpose, so no two encryptions share associated data.
+        fields = {
+            "aad": purpose,
+            "format": FORMAT_VERSION,
+            "vault_id": self.vault_id,
+            "username": self.username,
+            **extra,
+        }
+        return json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+    def body_aad(self) -> bytes:
+        """Associated data of the body: the vault's identity."""
+        return self._aad("body")
+
+    def password_aad(self) -> bytes:
+        """Associated data of the password copy of the DEK: identity and Argon2id inputs."""
+        return self._aad("password-wrap", kdf=_kdf_fields(self.kdf))
+
+    def recovery_aad(self) -> bytes:
+        """Associated data of the recovery copy of the DEK: identity and HKDF salt."""
+        return self._aad("recovery-wrap", salt=_b64_text(self.recovery_salt))
+
 
 @dataclass(frozen=True, slots=True)
 class VaultFile:
@@ -287,3 +321,73 @@ def serialize_body(body: Body) -> bytes:
     """The body as compact ASCII JSON, ready to encrypt."""
     doc = {"counter": body.counter, "entries": list(body.entries)}
     return json.dumps(doc, separators=(",", ":")).encode("ascii")
+
+
+# --- Putting the crypto and the format together ------------------------------------------
+
+
+def _wrap(kek: bytearray, dek: Key, aad: bytes) -> Sealed:
+    try:
+        return crypto.wrap_dek(kek, dek, aad)
+    finally:
+        crypto.wipe(kek)
+
+
+def _unwrap(kek: bytearray, sealed: Sealed, aad: bytes) -> bytearray:
+    try:
+        return crypto.unwrap_dek(kek, sealed.nonce, sealed.ct, aad)
+    finally:
+        crypto.wipe(kek)
+
+
+def create(
+    username: str, password: str, recovery_key: bytes, body: Body
+) -> tuple[VaultFile, bytearray]:
+    """Build a new vault: fresh vault ID, DEK, salts and nonces.
+
+    Returns the vault and its DEK. The caller keeps the DEK while the vault is
+    unlocked and wipes it on lock.
+    """
+    header = Header(
+        vault_id=secrets.token_hex(VAULT_ID_BYTES),
+        username=username,
+        kdf=KdfParams.new(),
+        recovery_salt=secrets.token_bytes(crypto.SALT_BYTES),
+    )
+    dek = crypto.new_key()
+    try:
+        password_kek = crypto.derive_kek(password, header.kdf)
+        password_dek = _wrap(password_kek, dek, header.password_aad())
+        recovery_kek = crypto.derive_recovery_kek(recovery_key, header.recovery_salt)
+        recovery_dek = _wrap(recovery_kek, dek, header.recovery_aad())
+        vault = VaultFile(header, password_dek, recovery_dek, seal_body(header, dek, body))
+    except BaseException:
+        crypto.wipe(dek)
+        raise
+    return vault, dek
+
+
+def unlock_with_password(vault: VaultFile, password: str) -> bytearray:
+    """Return the DEK if the password is right; otherwise raise CryptoError.
+
+    A wrong password and a changed header fail in the same way (T4, T7, T8).
+    """
+    kek = crypto.derive_kek(password, vault.header.kdf)
+    return _unwrap(kek, vault.password_dek, vault.header.password_aad())
+
+
+def unlock_with_recovery_key(vault: VaultFile, recovery_key: bytes) -> bytearray:
+    """Return the DEK if the recovery key is right; otherwise raise CryptoError."""
+    kek = crypto.derive_recovery_kek(recovery_key, vault.header.recovery_salt)
+    return _unwrap(kek, vault.recovery_dek, vault.header.recovery_aad())
+
+
+def seal_body(header: Header, dek: Key, body: Body) -> Sealed:
+    """Encrypt a body under the DEK with a fresh nonce."""
+    return crypto.encrypt(dek, serialize_body(body), header.body_aad())
+
+
+def open_body(vault: VaultFile, dek: Key) -> Body:
+    """Decrypt and parse the body. A wrong DEK or a changed identity raises CryptoError."""
+    plaintext = crypto.decrypt(dek, vault.body.nonce, vault.body.ct, vault.header.body_aad())
+    return parse_body(plaintext)
