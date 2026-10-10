@@ -1,17 +1,18 @@
-"""Tests for the vault file format (DESIGN.md §4; threats T7, T9, T19)."""
+"""Tests for the vault file format (DESIGN.md §4; threats T7, T8, T9, T13, T19)."""
 
 import dataclasses
 import json
-import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 
 from yunarpass import crypto, vaultfile
-from yunarpass.crypto import KdfParams, Sealed
+from yunarpass.crypto import CryptoError, KdfParams
 from yunarpass.vaultfile import Body, Header, VaultFile, VaultFormatError
 
+PASSWORD = "correct horse battery staple"
+RECOVERY_KEY = bytes(range(20))
 ENTRIES: tuple[dict[str, object], ...] = (
     {"id": "1", "type": "login", "name": "github", "password": "hunter2-but-longer"},
     {"id": "2", "type": "login", "name": "café", "notes": "ünïcödé ✓"},
@@ -27,20 +28,19 @@ FIXED_HEADER = Header(
 )
 
 
+@pytest.fixture(scope="module")
+def created() -> tuple[VaultFile, bytearray]:
+    return vaultfile.create("alice", PASSWORD, RECOVERY_KEY, Body(7, ENTRIES))
+
+
 @pytest.fixture
-def vault() -> VaultFile:
-    """A well-formed vault with random ciphertexts: it parses, but nothing in it decrypts."""
-    return VaultFile(
-        header=Header(
-            vault_id=secrets.token_hex(16),
-            username="alice",
-            kdf=KdfParams.new(),
-            recovery_salt=secrets.token_bytes(16),
-        ),
-        password_dek=Sealed(secrets.token_bytes(12), secrets.token_bytes(48)),
-        recovery_dek=Sealed(secrets.token_bytes(12), secrets.token_bytes(48)),
-        body=Sealed(secrets.token_bytes(12), secrets.token_bytes(100)),
-    )
+def vault(created: tuple[VaultFile, bytearray]) -> VaultFile:
+    return created[0]
+
+
+@pytest.fixture
+def dek(created: tuple[VaultFile, bytearray]) -> bytearray:
+    return created[1]
 
 
 def as_doc(vault: VaultFile) -> Doc:
@@ -75,6 +75,43 @@ def test_the_file_has_the_layout_of_the_design(vault: VaultFile) -> None:
     assert set(doc["wrapped_dek"]["recovery"]) == {"salt", "nonce", "ct"}
     assert set(doc["body"]) == {"nonce", "ct"}
     assert vaultfile.serialize(vault).isascii()
+
+
+def test_new_vaults_get_fresh_ids_salts_and_nonces(vault: VaultFile) -> None:
+    other, _ = vaultfile.create("alice", PASSWORD, RECOVERY_KEY, Body())
+    assert other.header.vault_id != vault.header.vault_id
+    assert other.header.kdf.salt != vault.header.kdf.salt
+    assert other.header.recovery_salt != vault.header.recovery_salt
+    assert other.password_dek.nonce != vault.password_dek.nonce
+
+
+def test_password_and_recovery_key_both_give_the_dek(vault: VaultFile, dek: bytearray) -> None:
+    assert vaultfile.unlock_with_password(vault, PASSWORD) == dek
+    assert vaultfile.unlock_with_recovery_key(vault, RECOVERY_KEY) == dek
+
+
+def test_the_body_decrypts_to_the_entries(vault: VaultFile, dek: bytearray) -> None:
+    assert vaultfile.open_body(vault, dek) == Body(7, ENTRIES)
+
+
+def test_no_entry_text_appears_in_the_file(vault: VaultFile) -> None:
+    data = vaultfile.serialize(vault)
+    for text in ("github", "hunter2", "caf", "login"):
+        assert text.encode() not in data
+
+
+def test_every_seal_uses_a_fresh_nonce(vault: VaultFile, dek: bytearray) -> None:
+    first = vaultfile.seal_body(vault.header, dek, Body(8, ENTRIES))
+    second = vaultfile.seal_body(vault.header, dek, Body(8, ENTRIES))
+    assert first.nonce != second.nonce
+    assert first.ct != second.ct
+
+
+def test_wrong_secrets_fail_with_the_generic_error(vault: VaultFile) -> None:
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_password(vault, PASSWORD + "!")
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_recovery_key(vault, bytes(20))
 
 
 # --- Malformed files are refused before any cryptography (T19) --------------------------
@@ -230,6 +267,22 @@ def test_error_messages_do_not_repeat_the_file_content(vault: VaultFile) -> None
     assert "script" not in str(caught.value)
 
 
+# --- T7: weakened KDF parameters ---------------------------------------------------------
+
+
+@pytest.fixture
+def kdf_spy(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[KdfParams]]:
+    calls: list[KdfParams] = []
+    real = crypto.derive_kek
+
+    def spy(password: str, params: KdfParams) -> bytearray:
+        calls.append(params)
+        return real(password, params)
+
+    monkeypatch.setattr(crypto, "derive_kek", spy)
+    yield calls
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -243,11 +296,124 @@ def test_error_messages_do_not_repeat_the_file_content(vault: VaultFile) -> None
         ("p", crypto.MAX_LANES + 1),
     ],
 )
-def test_weakened_kdf_parameters_are_refused(vault: VaultFile, field: str, value: int) -> None:
+def test_weakened_kdf_parameters_are_refused_before_the_kdf_runs(
+    vault: VaultFile, kdf_spy: list[KdfParams], field: str, value: int
+) -> None:
     doc = as_doc(vault)
     doc["kdf"][field] = value
     with pytest.raises(VaultFormatError, match=f"kdf.{field}"):
         from_doc(doc)
+    assert kdf_spy == []  # no vault object exists, so no KDF could run on these values
+
+
+def test_stronger_kdf_parameters_still_break_the_password_copy(
+    vault: VaultFile, kdf_spy: list[KdfParams]
+) -> None:
+    # Within the limits, so the file parses, but the parameters are bound to
+    # the password copy of the DEK as associated data.
+    doc = as_doc(vault)
+    doc["kdf"]["t"] = 4
+    edited = from_doc(doc)
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_password(edited, PASSWORD)
+    assert len(kdf_spy) == 1
+
+
+def test_a_changed_salt_breaks_only_its_own_copy(vault: VaultFile, dek: bytearray) -> None:
+    other_salt = dataclasses.replace(vault.header.kdf, salt=bytes(16))
+    edited = dataclasses.replace(vault, header=dataclasses.replace(vault.header, kdf=other_salt))
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_password(edited, PASSWORD)
+    assert vaultfile.unlock_with_recovery_key(edited, RECOVERY_KEY) == dek
+    assert vaultfile.open_body(edited, dek) == Body(7, ENTRIES)
+
+    edited = dataclasses.replace(
+        vault, header=dataclasses.replace(vault.header, recovery_salt=bytes(16))
+    )
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_recovery_key(edited, RECOVERY_KEY)
+    assert vaultfile.unlock_with_password(edited, PASSWORD) == dek
+
+
+# --- T8: vaults moved between users ----------------------------------------------------
+
+
+@pytest.mark.parametrize(("field", "value"), [("username", "bob"), ("vault_id", "f" * 32)])
+def test_a_changed_identity_breaks_every_encryption(
+    vault: VaultFile, dek: bytearray, field: str, value: str
+) -> None:
+    doc = as_doc(vault)
+    doc[field] = value
+    moved = from_doc(doc)  # well-formed, so only the cryptography can catch it
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_password(moved, PASSWORD)
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_recovery_key(moved, RECOVERY_KEY)
+    with pytest.raises(CryptoError):
+        vaultfile.open_body(moved, dek)  # even with the right DEK
+
+
+def test_parts_of_another_vault_do_not_fit(vault: VaultFile, dek: bytearray) -> None:
+    # Bob made his vault with the same password and recovery key as Alice.
+    bob, bob_dek = vaultfile.create("bob", PASSWORD, RECOVERY_KEY, Body(1, ()))
+    with_bobs_body = dataclasses.replace(vault, body=bob.body)
+    with pytest.raises(CryptoError):
+        vaultfile.open_body(with_bobs_body, dek)
+    with pytest.raises(CryptoError):
+        vaultfile.open_body(with_bobs_body, bob_dek)
+    with_bobs_key = dataclasses.replace(vault, password_dek=bob.password_dek)
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_password(with_bobs_key, PASSWORD)
+
+
+# --- The associated data -----------------------------------------------------------------
+
+
+def test_associated_data_known_answer() -> None:
+    # Pinned: if the encoding ever changed, every existing vault would stop opening.
+    zeros = "0" * 32
+    assert (
+        FIXED_HEADER.body_aad()
+        == ('{"aad":"body","format":1,"username":"alice","vault_id":"' + zeros + '"}').encode()
+    )
+    assert (
+        FIXED_HEADER.password_aad()
+        == (
+            '{"aad":"password-wrap","format":1,'
+            '"kdf":{"alg":"argon2id","m_kib":65536,"p":4,"salt":"AAAAAAAAAAAAAAAAAAAAAA==","t":3},'
+            '"username":"alice","vault_id":"' + zeros + '"}'
+        ).encode()
+    )
+    assert (
+        FIXED_HEADER.recovery_aad()
+        == (
+            '{"aad":"recovery-wrap","format":1,"salt":"AAECAwQFBgcICQoLDA0ODw==",'
+            '"username":"alice","vault_id":"' + zeros + '"}'
+        ).encode()
+    )
+
+
+def test_each_encryption_has_its_own_associated_data() -> None:
+    aads = {FIXED_HEADER.body_aad(), FIXED_HEADER.password_aad(), FIXED_HEADER.recovery_aad()}
+    assert len(aads) == 3
+
+
+def test_rewrapping_the_password_copy_leaves_the_rest_valid(
+    vault: VaultFile, dek: bytearray
+) -> None:
+    # What a password change does (D10): new salt, new KEK, new password copy.
+    # The recovery copy and the body are not touched and must still work.
+    header = dataclasses.replace(vault.header, kdf=KdfParams.new())
+    kek = crypto.derive_kek("a brand new password", header.kdf)
+    changed = dataclasses.replace(
+        vault, header=header, password_dek=crypto.wrap_dek(kek, dek, header.password_aad())
+    )
+    changed = vaultfile.parse(vaultfile.serialize(changed))
+    assert vaultfile.unlock_with_password(changed, "a brand new password") == dek
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_password(changed, PASSWORD)
+    assert vaultfile.unlock_with_recovery_key(changed, RECOVERY_KEY) == dek
+    assert vaultfile.open_body(changed, dek) == Body(7, ENTRIES)
 
 
 # --- The body (T9) -------------------------------------------------------------------------
@@ -315,3 +481,35 @@ def test_vaultfile_constructor_checks_its_fields(vault: VaultFile) -> None:
     ):
         with pytest.raises(VaultFormatError):
             dataclasses.replace(vault, **change)
+
+
+# --- Key hygiene (T13) ---------------------------------------------------------------------
+
+
+def test_unlock_wipes_the_kek(vault: VaultFile, monkeypatch: pytest.MonkeyPatch) -> None:
+    keks: list[bytearray] = []
+    real = crypto.derive_kek
+
+    def keep(password: str, params: KdfParams) -> bytearray:
+        keks.append(real(password, params))
+        return keks[-1]
+
+    monkeypatch.setattr(crypto, "derive_kek", keep)
+    vaultfile.unlock_with_password(vault, PASSWORD)
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_password(vault, "wrong password")
+    assert keks == [bytearray(32), bytearray(32)]  # zeroed after success and after failure
+
+
+def test_create_wipes_the_dek_if_it_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    deks: list[bytearray] = []
+    real = crypto.new_key
+
+    def keep() -> bytearray:
+        deks.append(real())
+        return deks[-1]
+
+    monkeypatch.setattr(crypto, "new_key", keep)
+    with pytest.raises(CryptoError):
+        vaultfile.create("alice", PASSWORD, bytes(19), Body())  # a recovery key too short
+    assert deks == [bytearray(32)]
