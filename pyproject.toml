@@ -9,7 +9,7 @@ description = "A local, multi-user password manager for the terminal (ICS0022 pr
 requires-python = ">=3.12"
 # Minimum versions only; the exact, hash-checked versions are in requirements.txt.
 dependencies = [
-    "cryptography>=44",
+    "cryptography>=47",
     "pywin32>=306; sys_platform == 'win32'",
 ]
 

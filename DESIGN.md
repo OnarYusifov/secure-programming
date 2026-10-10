@@ -316,7 +316,7 @@ immutable and may be copied. This is handled as partial mitigation plus accepted
 
 | Library | Purpose | Why |
 |---|---|---|
-| `cryptography` (pyca, >= 44) | Argon2id, AES-256-GCM, HKDF, TOTP | Widely used and audited; one dependency covers every primitive, so we do not implement any cryptography ourselves |
+| `cryptography` (pyca, >= 47) | Argon2id, AES-256-GCM, HKDF, TOTP | Widely used and audited; one dependency covers every primitive, so we do not implement any cryptography ourselves. Version 47 is the first that can derive and decrypt keys into a caller's buffer (D9) |
 | `pywin32` (Windows only) | Owner-only ACL when creating the data directory and files (T12); clipboard copy that stays out of the clipboard history (T18) | `os.chmod` on Windows can only set the read-only flag, so the standard library cannot make a file owner-only. A plain-text clipboard library cannot set the history-exclusion formats. Replaces `pyperclip` (§6) |
 | `pbcopy` / `wl-copy` / `xclip` (system tools, macOS and Linux) | Clipboard copy and clearing outside Windows | Already on the system, so no Python dependency; called by absolute path with an argument list, never through a shell |
 | `textual` (CP3) | Full-screen TUI | Modern terminal UI on top of the same core |
