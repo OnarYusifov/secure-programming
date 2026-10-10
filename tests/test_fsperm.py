@@ -6,7 +6,7 @@ The POSIX and Windows tests are defined only on their own OS; CI runs both.
 import os
 import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -182,24 +182,6 @@ if sys.platform == "win32":
             aces.append((ace_type, ace_flags, mask, win32security.ConvertSidToStringSid(sid)))
         return owner, control, aces
 
-    def grant_everyone_read(path: Path) -> None:
-        descriptor = win32security.GetNamedSecurityInfo(
-            str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-        )
-        dacl = descriptor.GetSecurityDescriptorDacl()
-        dacl.AddAccessAllowedAce(
-            win32security.ACL_REVISION, ntsecuritycon.FILE_GENERIC_READ, EVERYONE
-        )
-        win32security.SetNamedSecurityInfo(
-            str(path),
-            win32security.SE_FILE_OBJECT,
-            win32security.DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            dacl,
-            None,
-        )
-
     def current_user_sid() -> str:
         return win32security.ConvertSidToStringSid(fsperm._user_sid())
 
@@ -224,15 +206,19 @@ if sys.platform == "win32":
             (ntsecuritycon.ACCESS_ALLOWED_ACE_TYPE, inherit, ntsecuritycon.FILE_ALL_ACCESS, user)
         ]
 
-    def test_windows_directory_with_an_entry_for_everyone_is_refused(private_dir: Path) -> None:
-        grant_everyone_read(private_dir)
+    def test_windows_directory_with_an_entry_for_everyone_is_refused(
+        private_dir: Path, grant_others_read: Callable[[Path], None]
+    ) -> None:
+        grant_others_read(private_dir)
         with pytest.raises(UnsafeFileError, match="permissions for other users"):
             fsperm.ensure_data_dir(private_dir)
 
-    def test_windows_file_with_an_entry_for_everyone_is_refused(private_dir: Path) -> None:
+    def test_windows_file_with_an_entry_for_everyone_is_refused(
+        private_dir: Path, grant_others_read: Callable[[Path], None]
+    ) -> None:
         path = private_dir / "file"
         os.close(fsperm.create_private_file(path))
-        grant_everyone_read(path)
+        grant_others_read(path)
         fd = os.open(path, os.O_RDONLY)
         try:
             with pytest.raises(UnsafeFileError, match="permissions for other users"):
