@@ -2,5 +2,7 @@ pytest
 pytest-cov
 ruff
 mypy
+types-pywin32
 bandit
 pip-audit
+pip-tools
