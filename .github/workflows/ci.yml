@@ -44,7 +44,7 @@ jobs:
         run: ruff check .
 
       - name: Security scan (bandit)
-        run: bandit -q -r src
+        run: bandit -q -r src scripts
 
       - name: Dependency audit (pip-audit)
         run: pip-audit -r requirements.txt
@@ -109,12 +109,41 @@ jobs:
       - name: Tests with coverage (pytest, at least 80%)
         run: pytest -q --cov
 
+  # Follows the README's build-and-run block for the OS, line by line, on a
+  # runner that has nothing but Python: no pip cache, no dev tools.
+  readme-smoke:
+    name: readme-smoke (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.14"] # the oldest supported and the newest
+        include:
+          - os: ubuntu-latest
+            readme: posix
+          - os: windows-latest
+            readme: windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the README install steps verbatim
+        run: python scripts/readme_smoke.py "$README_BLOCK"
+        env:
+          README_BLOCK: ${{ matrix.readme }}
+
   # The one check that branch protection on main requires. Matrix entries
   # and new jobs can change without touching the protection rule; they
   # only need to be listed here.
   ci-ok:
     if: always()
-    needs: [checks, secrets, tests]
+    needs: [checks, secrets, tests, readme-smoke]
     runs-on: ubuntu-latest
     steps:
       - name: All required jobs passed
@@ -122,8 +151,10 @@ jobs:
           CHECKS: ${{ needs.checks.result }}
           SECRETS: ${{ needs.secrets.result }}
           TESTS: ${{ needs.tests.result }}
+          README_SMOKE: ${{ needs.readme-smoke.result }}
         run: |
-          echo "checks: $CHECKS, secrets: $SECRETS, tests: $TESTS"
+          echo "checks: $CHECKS, secrets: $SECRETS, tests: $TESTS, readme-smoke: $README_SMOKE"
           test "$CHECKS" = success
           test "$SECRETS" = success
           test "$TESTS" = success
+          test "$README_SMOKE" = success
