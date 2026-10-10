@@ -2,7 +2,7 @@
 #   python -m piptools compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url requirements.in
 # Run it on Windows, so the Windows-only pywin32 pin keeps its marker.
 
-cryptography>=44
+cryptography>=47  # derive_into and decrypt_into (buffer-based keys) are new in 47
 pywin32>=306; sys_platform == "win32"
 
 # Build backend. Pinned here so `pip install --no-build-isolation .` uses a
