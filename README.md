@@ -119,6 +119,11 @@ nothing from the parent folder. yunarpass refuses to use the directory, rather t
 it is a symlink or junction, belongs to another user, or has been opened up to anyone else. It
 also refuses a data file that is a link, has a second hard link or is larger than 8 MiB.
 
+Each vault is a JSON file, `vault-<random id>.json`. Its username, vault ID and key-derivation
+settings can be read, but they are authenticated, so an edited value makes the vault refuse to
+open; the entries and both copies of the data key are encrypted. The format is in
+[DESIGN.md §4](DESIGN.md#4-cryptographic-scheme-and-vault-format).
+
 Every save writes a temporary file and renames it over the old one, so a crash or power cut leaves
 either the old or the new version, never a half-written file. The version before the last save is
 kept next to each file as `users.json.bak` or `vault-<id>.json.bak`.
