@@ -380,6 +380,6 @@ and prove it. The pull request that implements a mitigation fills in its code an
 | T20 predictable generated passwords | `secrets` CSPRNG | #17, #25 | — | — |
 | T21 password and TOTP secret together | Same protection as the vault; accepted trade-off | CP3 | — | — |
 | T22 SSH key misused from the agent | Key passed via stdin; 10-minute lifetime | CP3 | — | — |
-| T23 malicious dependency | Few libraries, pinned; `pip-audit` and secret scanning in CI; CI actions pinned by commit SHA | #10, #13, #14, #15 | `.github/workflows/ci.yml` (`pip-audit` step, `secrets` job, SHA-pinned actions) | — |
+| T23 malicious dependency | Few libraries, pinned; `pip-audit` and secret scanning in CI; CI actions pinned by commit SHA | #10, #13, #14, #15 | `.github/workflows/ci.yml` (`pip-audit` step, `secrets` job, SHA-pinned actions) | A planted fake secret failed the `secrets` job and `ci-ok` (throwaway PR #32, 10 Oct 2026) |
 | T24 tampered install | Dependencies installed with `--require-hashes` | #15 | — | — |
 | T25 password read from the screen | Passwords never printed: `show` masks, `gen` and `copy` use the clipboard | #21, #24, #25 | — | — |
