@@ -89,7 +89,7 @@ flowchart LR
 
 | Item | Location | Form |
 |---|---|---|
-| Data directory | `~/.yunarpass/` by default, overridable with the `YUNARPASS_HOME` environment variable (never with a command-line path) | Created owner-only |
+| Data directory | `~/.yunarpass/` by default, overridable with the `YUNARPASS_HOME` environment variable (never with a command-line path) | Created owner-only; refused at startup if it is a link or junction, belongs to another user, or anyone else has access |
 | Vault contents (A1, A6, A7) | `vault-<id>.json` in the data directory | Encrypted and authenticated with the DEK |
 | DEK | Vault file header | Wrapped twice: by the KEK from the master password, and by the key from the recovery key |
 | KEK | RAM only | Derived at login, discarded after the DEK is unwrapped |
@@ -189,7 +189,7 @@ flowchart LR
 | T9 | Roll the vault back to an older copy (M1, M2) | UC3 | Low | A version counter inside the encrypted vault is shown to the user after unlock | Not fully preventable locally: the attacker can roll back every file at once. Accepted |
 | T10 | Crash or power loss during a save corrupts the vault (availability) | UC3 | Medium | Atomic save: write a temp file, flush it, then rename; the previous encrypted copy is kept as a backup | Disk failure; users are told to back up the vault file |
 | T11 | Path traversal or a symlink/hard link through a crafted username or file name (M2) | UC1, UC2 | Medium | Vault file names are random IDs, never the username; usernames are checked against an allow-list; the tool refuses symlinks and files it does not own; the data directory is owner-only | None significant |
-| T12 | Another OS user reads the vault files (M2) | UC3 | Low | Files created owner-only, as defence in depth on top of T6: mode 0600 (directory 0700) on POSIX; on Windows a protected ACL that grants access to the current user only, set when the file is created, so there is no moment when the file is readable by others (§6) | An administrator can always read them, but only as ciphertext |
+| T12 | Another OS user reads the vault files (M2) | UC3 | Low | Files created owner-only, as defence in depth on top of T6: mode 0600 (directory 0700) on POSIX; on Windows a protected ACL that grants access to the current user only, set when the file is created, so there is no moment when the file is readable by others (§6). The directory is checked again at startup and every file when it is opened; anything that belongs to another user or grants anyone else access is refused, not repaired | An administrator can always read them, but only as ciphertext |
 
 ### Vault in memory (A1, A2, A3)
 
@@ -371,8 +371,8 @@ and prove it. The pull request that implements a mitigation fills in its code an
 | T8 vaults swapped between users | Username bound into the AAD | #16, #20, #23 | `crypto.py`: AAD is required and non-empty | `test_crypto.py`: `test_changed_associated_data_fails` (other username), `test_empty_associated_data_is_refused` |
 | T9 rollback | Counter inside the encrypted body, shown after unlock | #20, #23 | — | — |
 | T10 crash during save | Atomic write with a backup copy | #19 | — | — |
-| T11 path traversal, symlinks, hard links | Random file names, allow-lists, links and foreign-owned files refused | #18, #19, #22 | — | — |
-| T12 other OS users read files | Owner-only permissions set at creation | #18 | — | — |
+| T11 path traversal, symlinks, hard links | Random file names, allow-lists, links and foreign-owned files refused | #18, #19, #22 | `fsperm.py`: `create_private_file` (`O_EXCL` / `CREATE_NEW`), `check_private_dir` (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`) | `test_fsperm.py`: `test_posix_create_does_not_follow_a_symlink`, `test_posix_symlink_in_place_of_the_directory_is_refused`, `test_windows_junction_in_place_of_the_directory_is_refused`, `test_windows_symlink_in_place_of_the_directory_is_refused`, `test_a_file_in_place_of_the_directory_is_refused` |
+| T12 other OS users read files | Owner-only permissions set at creation; checked again on use | #18 | `fsperm.py`: `make_private_dir`, `create_private_file`, `check_private_dir`, `check_private_fd`, `ensure_data_dir` | `test_fsperm.py`: `test_posix_new_directory_is_0700`, `test_posix_new_file_is_0600`, `test_windows_acl_is_protected_with_one_entry_for_the_user`, `test_posix_loosened_directory_is_refused`, `test_posix_loosened_file_is_refused`, `test_windows_directory_with_an_entry_for_everyone_is_refused`, `test_windows_directory_with_inherited_entries_is_refused`, `test_windows_null_dacl_is_refused`, `test_*_owned_by_another_user_is_refused` |
 | T13 secrets read from memory | Short key lifetime; keys in wipeable buffers; DEK zeroed on lock (best effort) | #16, #28; CP3 | `crypto.py`: `derive_kek`/`unwrap_dek` return `bytearray`, `wipe` | `test_crypto.py`: `test_wipe_zeroes_the_buffer_in_place`, `test_wrap_unwrap_round_trip` |
 | T14 secrets in swap or crash dumps | Core dumps disabled where the OS allows | CP3 | — | — |
 | T15 unattended session | `lock` and 5-minute auto-lock | #28 | — | — |
