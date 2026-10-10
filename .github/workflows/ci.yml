@@ -79,5 +79,5 @@ jobs:
       - name: Type-check (mypy)
         run: mypy
 
-      - name: Tests (pytest)
-        run: pytest -q
+      - name: Tests with coverage (pytest, at least 80%)
+        run: pytest -q --cov
