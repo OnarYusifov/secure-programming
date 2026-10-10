@@ -8,6 +8,11 @@ Implements the scheme in DESIGN.md §4:
 
 Every failure raises CryptoError without detail, so a caller cannot tell a wrong
 password from a tampered file (T4, T7, T8).
+
+Keys are returned as bytearrays that the caller overwrites with wipe() when it
+is done (T13). The KDF and the DEK unwrap write straight into those buffers, so
+these keys never exist as immutable bytes in Python. This is best effort only:
+the library may hold internal copies that Python cannot reach.
 """
 
 import secrets
@@ -106,6 +111,11 @@ def _check_sealed(nonce: bytes, ct: bytes) -> None:
         raise CryptoError
 
 
+def wipe(buf: bytearray) -> None:
+    """Overwrite a key buffer with zeros, in place (best effort, T13)."""
+    buf[:] = bytes(len(buf))
+
+
 def new_key() -> bytearray:
     """Return a fresh random 256-bit key (a DEK) from the OS CSPRNG."""
     return bytearray(secrets.token_bytes(KEY_BYTES))
@@ -151,3 +161,25 @@ def decrypt(key: Key, nonce: bytes, ct: bytes, aad: bytes) -> bytes:
         return AESGCM(key).decrypt(nonce, ct, aad)
     except InvalidTag:
         raise CryptoError from None
+
+
+def wrap_dek(kek: Key, dek: Key, aad: bytes) -> Sealed:
+    """Encrypt the DEK under a KEK."""
+    _check_key(dek)
+    return encrypt(kek, dek, aad)  # no bytes() copy of the DEK
+
+
+def unwrap_dek(kek: Key, nonce: bytes, ct: bytes, aad: bytes) -> bytearray:
+    """Decrypt a wrapped DEK straight into a new buffer the caller must wipe()."""
+    _check_key(kek)
+    _check_aad(aad)
+    _check_sealed(nonce, ct)
+    if len(ct) != KEY_BYTES + TAG_BYTES:
+        raise CryptoError
+    dek = bytearray(KEY_BYTES)
+    try:
+        AESGCM(kek).decrypt_into(nonce, ct, aad, dek)
+    except InvalidTag:
+        wipe(dek)  # never leave unverified plaintext behind
+        raise CryptoError from None
+    return dek
