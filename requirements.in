@@ -1,0 +1,10 @@
+# Runtime dependencies. Edit this file, then regenerate requirements.txt:
+#   python -m piptools compile --generate-hashes --allow-unsafe --strip-extras requirements.in
+# Run it on Windows, so the Windows-only pywin32 pin keeps its marker.
+
+cryptography>=44
+pywin32>=306; sys_platform == "win32"
+
+# Build backend. Pinned here so `pip install --no-build-isolation .` uses a
+# hash-checked copy instead of downloading an unchecked one.
+setuptools>=69
