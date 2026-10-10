@@ -116,3 +116,76 @@ def test_kdf_params_new_uses_the_floor_and_a_fresh_salt() -> None:
     assert (first.memory_kib, first.iterations, first.lanes) == (65536, 3, 4)
     assert len(first.salt) == crypto.SALT_BYTES
     assert first.salt != second.salt
+
+
+# --- Authenticated encryption (T6, T7, T8) -----------------------------------
+
+
+def test_encrypt_decrypt_round_trip() -> None:
+    key = crypto.new_key()
+    sealed = crypto.encrypt(key, b"secret vault body", AAD)
+    assert b"secret vault body" not in sealed.ct
+    assert len(sealed.nonce) == crypto.NONCE_BYTES
+    assert crypto.decrypt(key, sealed.nonce, sealed.ct, AAD) == b"secret vault body"
+
+
+def test_decrypt_with_wrong_key_fails() -> None:
+    sealed = crypto.encrypt(crypto.new_key(), b"body", AAD)
+    with pytest.raises(CryptoError):
+        crypto.decrypt(crypto.new_key(), sealed.nonce, sealed.ct, AAD)
+
+
+@pytest.mark.parametrize("index", [0, 5, -17, -1])  # ciphertext bytes and tag bytes
+def test_flipped_ciphertext_bit_fails(index: int) -> None:
+    key = crypto.new_key()
+    sealed = crypto.encrypt(key, b"sixteen byte msg", AAD)
+    with pytest.raises(CryptoError):
+        crypto.decrypt(key, sealed.nonce, flip_bit(sealed.ct, index), AAD)
+
+
+def test_flipped_nonce_bit_fails() -> None:
+    key = crypto.new_key()
+    sealed = crypto.encrypt(key, b"body", AAD)
+    with pytest.raises(CryptoError):
+        crypto.decrypt(key, flip_bit(sealed.nonce, 0), sealed.ct, AAD)
+
+
+def test_changed_associated_data_fails() -> None:
+    # The header is the AAD: weakened KDF parameters (T7) or another username
+    # (T8) in the header make decryption fail.
+    key = crypto.new_key()
+    sealed = crypto.encrypt(key, b"body", AAD)
+    for changed in (flip_bit(AAD, 3), AAD.replace(b"alice", b"mallo"), AAD + b" "):
+        with pytest.raises(CryptoError):
+            crypto.decrypt(key, sealed.nonce, sealed.ct, changed)
+
+
+@pytest.mark.parametrize(
+    ("nonce", "ct"),
+    [
+        (bytes(11), bytes(32)),
+        (bytes(13), bytes(32)),
+        (bytes(12), bytes(15)),
+        ("x" * 12, bytes(32)),
+    ],
+)
+def test_malformed_input_is_refused_before_decrypting(nonce: bytes, ct: bytes) -> None:
+    with pytest.raises(CryptoError):
+        crypto.decrypt(crypto.new_key(), nonce, ct, AAD)
+
+
+@pytest.mark.parametrize("key", [bytes(16), bytes(24), bytes(33), "k" * 32])
+def test_only_256_bit_keys_are_accepted(key: bytes) -> None:
+    with pytest.raises(CryptoError):
+        crypto.encrypt(key, b"body", AAD)
+
+
+def test_empty_associated_data_is_refused() -> None:
+    with pytest.raises(CryptoError):
+        crypto.encrypt(crypto.new_key(), b"body", b"")
+
+
+def test_nonces_are_unique() -> None:
+    key = crypto.new_key()
+    nonces = {crypto.encrypt(key, b"x", AAD).nonce for _ in range(10_000)}
+    assert len(nonces) == 10_000
