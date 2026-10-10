@@ -1,5 +1,5 @@
 # Runtime dependencies. Edit this file, then regenerate requirements.txt:
-#   python -m piptools compile --generate-hashes --allow-unsafe --strip-extras requirements.in
+#   python -m piptools compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url requirements.in
 # Run it on Windows, so the Windows-only pywin32 pin keeps its marker.
 
 cryptography>=44
