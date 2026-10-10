@@ -8,13 +8,27 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older, now pointless runs.
+# Runs on main always finish, so every commit there gets a result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# bash runs with -e and pipefail, so any failing command fails the step.
+# The Windows default (PowerShell) only checks the last command's exit code.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
@@ -29,14 +43,41 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
-      - name: Type-check (mypy)
-        run: mypy
-
       - name: Security scan (bandit)
         run: bandit -q -r src
 
       - name: Dependency audit (pip-audit)
         run: pip-audit -r requirements.txt
+
+  tests:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      # On each OS, because code under `sys.platform == "win32"` is only
+      # type-checked on that platform.
+      - name: Type-check (mypy)
+        run: mypy
 
       - name: Tests (pytest)
         run: pytest -q
