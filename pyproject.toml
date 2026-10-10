@@ -7,7 +7,11 @@ name = "yunarpass"
 version = "0.0.1"
 description = "A local, multi-user password manager for the terminal (ICS0022 project)"
 requires-python = ">=3.12"
-dependencies = []
+# Minimum versions only; the exact, hash-checked versions are in requirements.txt.
+dependencies = [
+    "cryptography>=44",
+    "pywin32>=306; sys_platform == 'win32'",
+]
 
 [project.scripts]
 yunarpass = "yunarpass.__main__:main"
