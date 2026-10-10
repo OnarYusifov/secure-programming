@@ -162,12 +162,7 @@ def test_changed_associated_data_fails() -> None:
 
 @pytest.mark.parametrize(
     ("nonce", "ct"),
-    [
-        (bytes(11), bytes(32)),
-        (bytes(13), bytes(32)),
-        (bytes(12), bytes(15)),
-        ("x" * 12, bytes(32)),
-    ],
+    [(bytes(11), bytes(32)), (bytes(13), bytes(32)), (bytes(12), bytes(15)), ("x" * 12, bytes(32))],
 )
 def test_malformed_input_is_refused_before_decrypting(nonce: bytes, ct: bytes) -> None:
     with pytest.raises(CryptoError):
@@ -189,3 +184,57 @@ def test_nonces_are_unique() -> None:
     key = crypto.new_key()
     nonces = {crypto.encrypt(key, b"x", AAD).nonce for _ in range(10_000)}
     assert len(nonces) == 10_000
+
+
+# --- DEK wrapping (UC2, UC7) ------------------------------------------------------
+
+
+def test_wrap_unwrap_round_trip(kek: bytearray) -> None:
+    dek = crypto.new_key()
+    sealed = crypto.wrap_dek(kek, dek, AAD)
+    unwrapped = crypto.unwrap_dek(kek, sealed.nonce, sealed.ct, AAD)
+    assert isinstance(unwrapped, bytearray)
+    assert unwrapped == dek
+
+
+def test_wrong_password_and_tampered_header_look_the_same(
+    params: KdfParams, kek: bytearray
+) -> None:
+    sealed = crypto.wrap_dek(kek, crypto.new_key(), AAD)
+    wrong_kek = crypto.derive_kek("not the password", params)
+    errors = []
+    for key, aad in ((wrong_kek, AAD), (kek, flip_bit(AAD, 0))):
+        with pytest.raises(CryptoError) as caught:
+            crypto.unwrap_dek(key, sealed.nonce, sealed.ct, aad)
+        errors.append(caught.value)
+    assert str(errors[0]) == str(errors[1]) == "cryptographic operation failed"
+    for error in errors:
+        # No chained library exception that a traceback could reveal (T17).
+        assert error.__cause__ is None
+        assert error.__suppress_context__
+
+
+def test_unwrap_refuses_wrong_length(kek: bytearray) -> None:
+    sealed = crypto.encrypt(kek, bytes(31), AAD)
+    with pytest.raises(CryptoError):
+        crypto.unwrap_dek(kek, sealed.nonce, sealed.ct, AAD)
+
+
+def test_wrap_refuses_a_short_dek(kek: bytearray) -> None:
+    with pytest.raises(CryptoError):
+        crypto.wrap_dek(kek, bytes(16), AAD)
+
+
+# --- Key hygiene (T13) ---------------------------------------------------------------
+
+
+def test_wipe_zeroes_the_buffer_in_place() -> None:
+    key = crypto.new_key()
+    same_object = key
+    crypto.wipe(key)
+    assert key is same_object
+    assert key == bytearray(crypto.KEY_BYTES)
+
+
+def test_new_keys_are_random() -> None:
+    assert crypto.new_key() != crypto.new_key()
