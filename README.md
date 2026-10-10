@@ -116,7 +116,12 @@ Data is stored in `~/.yunarpass/` (override with the `YUNARPASS_HOME` environmen
 The directory and every file in it are created readable by the owner only: mode 0700/0600 on
 Linux and macOS, and on Windows an access list that names only the current user and inherits
 nothing from the parent folder. yunarpass refuses to use the directory, rather than repair it, if
-it is a symlink or junction, belongs to another user, or has been opened up to anyone else.
+it is a symlink or junction, belongs to another user, or has been opened up to anyone else. It
+also refuses a data file that is a link, has a second hard link or is larger than 8 MiB.
+
+Every save writes a temporary file and renames it over the old one, so a crash or power cut leaves
+either the old or the new version, never a half-written file. The version before the last save is
+kept next to each file as `users.json.bak` or `vault-<id>.json.bak`.
 
 Development, with the virtual environment activated (`.venv\Scripts\activate` on Windows,
 `source .venv/bin/activate` elsewhere; if PowerShell refuses to run the script, allow it once with
