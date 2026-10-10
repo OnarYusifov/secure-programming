@@ -247,9 +247,9 @@ recovery key   --HKDF-SHA256(salt)----> KEK_rk --AES-256-GCM wrap--+
 | Nonces | A fresh random 96-bit nonce for every encryption, including every save | A nonce must never repeat under the same key. With random nonces, the safe limit (about 2^32 encryptions per key) is far beyond our save volume |
 | Associated data | The header (format version, vault ID, username, KDF parameters and salts) is passed as associated data to all three encryptions: both DEK wraps and the body. It is authenticated but not encrypted | Binds each vault to its owner and its parameters; any change to the header makes every unwrap and the body decryption fail (T7, T8) |
 | Password change (UC7) | A new salt and KEK are derived from the new password and the DEK is re-wrapped; the body and the recovery wrap are unchanged | The vault is never re-encrypted, so a change is fast and cannot half-complete |
-| Recovery key | 160 random bits, shown once as 32 Base32 characters in groups of 4; its KEK is derived with **HKDF-SHA256** | It is already high-entropy, so a slow KDF is not needed. Using it forces a new master password and a new recovery key (T5) |
+| Recovery key | 160 random bits, shown once as 32 Base32 characters in 8 groups of 4 (`ABCD-EFGH-…`); typed back in either case, with spaces and dashes ignored and anything else refused. Its KEK is derived with **HKDF-SHA256** from the key and a 16-byte salt, with the fixed label `yunarpass/recovery-kek/v1` as HKDF `info` | It is already high-entropy, so a slow KDF is not needed. Base32 has no 0, 1, 8 or 9, which are easy to misread on paper. The label keeps this key separate from any other key derived from the same input. Using it forces a new master password and a new recovery key (T5) |
 | Login check | No password hash is stored. A wrong password fails the tag check when unwrapping the DEK | No extra offline target on disk; one generic error (T4) |
-| Password generator | `secrets` module, 20 characters by default | CSPRNG output, not predictable (T20) |
+| Password generator | `secrets.choice` over 90 characters: letters, digits and 28 symbols (no quotes, backslash, backtick or space). 20 characters by default (about 130 bits), 12 to 128 allowed. Every class appears at least once; a candidate missing one is redrawn (rejection sampling) | CSPRNG output, not predictable (T20). Redrawing keeps every allowed password equally likely, whereas forcing a class into a fixed position would make guessing easier. The left-out symbols are the ones web forms and shells often mishandle |
 | TOTP codes | `cryptography`'s TOTP implementation (RFC 6238) | No extra dependency (T23) |
 
 ### Vault file format (`vault-<id>.json`, format version 1)
@@ -365,7 +365,7 @@ and prove it. The pull request that implements a mitigation fills in its code an
 | T2 online guessing | KDF cost per attempt; delay doubling after each failure | #23 | — | — |
 | T3 password seen while typed | Masked input | #21 | — | — |
 | T4 username enumeration | One generic error; the KDF also runs for unknown usernames | #23 | — | — |
-| T5 recovery key stolen | 160-bit key shown once; using it forces a new password and key | #17, #22, #27 | — | — |
+| T5 recovery key stolen | 160-bit key shown once; using it forces a new password and key | #17, #22, #27 | `crypto.py`: `derive_recovery_kek`; `secrets_gen.py`: `new_recovery_key`, `format_recovery_key`, `parse_recovery_key` | `test_crypto.py`: `test_hkdf_matches_rfc5869_vector`, `test_recovery_kek_known_answer`; `test_secrets_gen.py`: `test_parse_refuses_malformed_input`, `test_format_parse_round_trip` |
 | T6 vault read from disk | AES-256-GCM over the whole body; no plaintext on disk | #16, #20 | `crypto.py`: `encrypt`, `decrypt` | `test_crypto.py`: `test_encrypt_decrypt_round_trip`, `test_decrypt_with_wrong_key_fails`, `test_nonces_are_unique` |
 | T7 header tampering | Header authenticated as AAD; KDF floor and ceiling enforced on load | #16, #20 | `crypto.py`: `KdfParams.check`, AAD in `encrypt`/`decrypt`/`unwrap_dek` | `test_crypto.py`: `test_kdf_params_outside_limits_are_refused`, `test_derive_kek_rechecks_params`, `test_changed_associated_data_fails`, `test_flipped_ciphertext_bit_fails` |
 | T8 vaults swapped between users | Username bound into the AAD | #16, #20, #23 | `crypto.py`: AAD is required and non-empty | `test_crypto.py`: `test_changed_associated_data_fails` (other username), `test_empty_associated_data_is_refused` |
@@ -380,7 +380,7 @@ and prove it. The pull request that implements a mitigation fills in its code an
 | T17 secrets in errors or logs | Generic errors, no tracebacks; logging in CP3 | #21; CP3 | — | — |
 | T18 clipboard | 20 s clear; Windows history exclusion; cleared on lock | #25, #28 | — | — |
 | T19 malicious input | Allow-lists, length limits, output sanitizer | #21, #24 | — | — |
-| T20 predictable generated passwords | `secrets` CSPRNG | #17, #25 | — | — |
+| T20 predictable generated passwords | `secrets` CSPRNG | #17, #25 | `secrets_gen.py`: `generate_password` | `test_secrets_gen.py`: `test_module_never_imports_random`, `test_classes_are_not_in_fixed_positions`, `test_every_alphabet_character_gets_used`; bandit B311 in CI |
 | T21 password and TOTP secret together | Same protection as the vault; accepted trade-off | CP3 | — | — |
 | T22 SSH key misused from the agent | Key passed via stdin; 10-minute lifetime | CP3 | — | — |
 | T23 malicious dependency | Few libraries, pinned; `pip-audit` and secret scanning in CI; CI actions pinned by commit SHA | #10, #13, #14, #15 | `requirements.in` → `requirements.txt` (exact versions); `.github/workflows/ci.yml` (`pip-audit` step, `secrets` job, SHA-pinned actions) | A planted fake secret failed the `secrets` job and `ci-ok` (throwaway PR #32, 10 Oct 2026) |

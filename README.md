@@ -59,7 +59,7 @@ After unlocking (`yunarpass>` prompt):
 | `ssh-load <name>` | Load the key into `ssh-agent` for 10 minutes |
 | `edit <name>` | Edit an entry; the password prompt is masked and also accepts `gen` |
 | `rm <name>` | Delete an entry, after confirmation |
-| `gen [length]` | Generate a password (default 20 characters) and copy it to the clipboard; it is never printed |
+| `gen [length]` | Generate a password (20 characters by default, 12 to 128) with letters, digits and symbols, and copy it to the clipboard; it is never printed |
 | `passwd` | Change the master password |
 | `lock` | Lock the vault and clear the clipboard; also happens automatically after 5 minutes idle |
 | `quit` | Lock and exit |
