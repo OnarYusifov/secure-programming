@@ -107,8 +107,10 @@ pytest --cov
 `pytest --cov` measures branch coverage and fails below 80%; plain `pytest` skips the measurement.
 
 The same checks run in CI on every pull request and every push to `main`: lint and security scans
-once, and type checks and tests on Ubuntu and Windows with Python 3.12 and 3.14. The `ci-ok` job
-passes only when all of them pass, and `main` requires it.
+once, a [gitleaks](https://github.com/gitleaks/gitleaks) secret scan over the whole git history,
+and type checks and tests on Ubuntu and Windows with Python 3.12 and 3.14. The `ci-ok` job passes
+only when all of them pass, and `main` requires it. With gitleaks installed, the secret scan runs
+locally as `gitleaks git --redact .`.
 
 ## Status
 
