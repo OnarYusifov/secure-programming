@@ -1,8 +1,7 @@
 # Progress notes
 
-One section per checkpoint: what was delivered, where the evidence is, and what changed from the
-plan. The CP2 brief asks for "a short progress note"; this file is that note, and the PDF submitted
-in Moodle is exported from it.
+One section per checkpoint of the project: what was delivered, where the evidence is, and what
+changed from the plan.
 
 ## Checkpoint 1: threat model and architecture
 
@@ -17,7 +16,7 @@ Due 25 Sep 2026. **Done**, merged on 25 Sep 2026.
   `bandit`, `pip-audit` and `pytest`, with a package skeleton for the pipeline to check.
 
 Process: one GitHub issue per unit of work (#1–#4, #10), each closed by its own pull request
-(#5–#9, #11). Submitted in Moodle as DESIGN.pdf, README.pdf and the repository link.
+(#5–#9, #11).
 
 ## Checkpoint 2: core requirements implemented
 
