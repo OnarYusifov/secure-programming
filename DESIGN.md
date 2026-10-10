@@ -246,8 +246,8 @@ recovery key   --HKDF-SHA256(salt)----> KEK_rk --AES-256-GCM wrap--+
 | Data key (DEK) | 256 random bits from the OS CSPRNG (`secrets`) | Independent of the password, so changing the password only re-wraps the DEK (UC7) |
 | Encryption | **AES-256-GCM** (authenticated encryption, AEAD) for the vault body and for each wrapped DEK | Confidentiality (T6) and integrity: any modified byte makes decryption fail (T7, T8) |
 | Nonces | A fresh random 96-bit nonce for every encryption, including every save | A nonce must never repeat under the same key. With random nonces, the safe limit (about 2^32 encryptions per key) is far beyond our save volume |
-| Associated data | The header (format version, vault ID, username, KDF parameters and salts) is passed as associated data to all three encryptions: both DEK wraps and the body. It is authenticated but not encrypted | Binds each vault to its owner and its parameters; any change to the header makes every unwrap and the body decryption fail (T7, T8) |
-| Password change (UC7) | A new salt and KEK are derived from the new password and the DEK is re-wrapped; the body and the recovery wrap are unchanged | The vault is never re-encrypted, so a change is fast and cannot half-complete |
+| Associated data | Each of the three encryptions has its own associated data (AAD), authenticated but not encrypted. All three contain the vault's identity: format version, vault ID and username. The password copy of the DEK also binds the Argon2id parameters and salt, and the recovery copy its HKDF salt. A purpose label keeps the three distinct (§6, D10) | A vault renamed to another user or swapped into another user's place fails all three decryptions (T8). Weakened or edited KDF inputs make their own copy of the DEK fail (T7) |
+| Password change (UC7) | A new salt and KEK are derived from the new password and the password copy of the DEK is re-wrapped; the body and the recovery copy are unchanged, which works because neither binds the password's KDF inputs | The vault is never re-encrypted, so a change is fast and cannot half-complete |
 | Recovery key | 160 random bits, shown once as 32 Base32 characters in 8 groups of 4 (`ABCD-EFGH-…`); typed back in either case, with spaces and dashes ignored and anything else refused. Its KEK is derived with **HKDF-SHA256** from the key and a 16-byte salt, with the fixed label `yunarpass/recovery-kek/v1` as HKDF `info` | It is already high-entropy, so a slow KDF is not needed. Base32 has no 0, 1, 8 or 9, which are easy to misread on paper. The label keeps this key separate from any other key derived from the same input. Using it forces a new master password and a new recovery key (T5) |
 | Login check | No password hash is stored. A wrong password fails the tag check when unwrapping the DEK | No extra offline target on disk; one generic error (T4) |
 | Password generator | `secrets.choice` over 90 characters: letters, digits and 28 symbols (no quotes, backslash, backtick or space). 20 characters by default (about 130 bits), 12 to 128 allowed. Every class appears at least once; a candidate missing one is redrawn (rejection sampling) | CSPRNG output, not predictable (T20). Redrawing keeps every allowed password equally likely, whereas forcing a class into a fixed position would make guessing easier. The left-out symbols are the ones web forms and shells often mishandle |
@@ -255,8 +255,13 @@ recovery key   --HKDF-SHA256(salt)----> KEK_rk --AES-256-GCM wrap--+
 
 ### Vault file format (`vault-<id>.json`, format version 1)
 
-A UTF-8 JSON document. Binary fields are Base64-encoded. It is parsed strictly: unknown fields,
-missing fields, wrong types and oversized values are rejected before any cryptography runs.
+A UTF-8 JSON document. Binary fields are Base64-encoded. It is parsed strictly, and anything
+unexpected is rejected before any cryptography runs (T7, T19): a format other than 1; unknown,
+missing or duplicate fields (plain `json.loads` would silently keep the last of two); wrong types,
+including `true` where a number is expected; Base64 that is not canonical or decodes to the wrong
+length; KDF parameters outside the floor and ceiling; a vault ID that is not 32 lowercase hex
+digits; a username outside `[a-z0-9][a-z0-9_-]{2,31}`; and files over 8 MiB. Error messages name
+the rule that failed, never the value found.
 
 ```json
 {
@@ -287,6 +292,18 @@ The decrypted body is also JSON:
 ```
 
 `counter` increases on every save and is shown after unlock, which helps the user notice a rollback (T9).
+The body is parsed as strictly as the file: exactly `counter` (0 to 2^63 − 1) and `entries` (a
+list of objects).
+
+The associated data is canonical JSON (sorted keys, no spaces, ASCII), so the same header always
+gives the same bytes. For the body:
+
+```json
+{"aad":"body","format":1,"username":"alice","vault_id":"3f9c0d2e8a7b4c61a2e5f0b9d8c7a6e1"}
+```
+
+The password copy adds `"kdf":{"alg":"argon2id","m_kib":65536,"p":4,"salt":"…","t":3}` with
+`"aad":"password-wrap"`, and the recovery copy adds `"salt":"…"` with `"aad":"recovery-wrap"`.
 
 `users.json` holds only `username` → `vault_id` and contains no secrets. Vault file names are
 random IDs, never usernames (T11). Registration refuses an existing username, and `users.json` is
@@ -347,6 +364,7 @@ match; this log keeps the history of each change.
 | D7 | 10 Oct 2026 | — | New threat T25: a password read from the screen or the scrollback | It is the threat behind the "never prints passwords" rule and had no row of its own | T25 |
 | D8 | 10 Oct 2026 | Only a minimum for the Argon2id parameters | A maximum as well: 1 GiB, 64 iterations, 16 lanes | Without it, an edited header could ask for terabytes of memory or hours of hashing, and the program would try before the authentication tag can fail (availability) | T7 |
 | D9 | 10 Oct 2026 | "Only the lifetime is controlled" for keys in memory | The KEK and the DEK are written straight into `bytearray` buffers that are zeroed after use; a failed unwrap zeroes its buffer at once | `cryptography` ≥ 47 can derive and decrypt into a caller's buffer, so these two keys never exist as immutable `bytes` in Python. The master password (a `str`) still cannot be wiped | T13 |
+| D10 | 10 Oct 2026 | The whole header, including both salts and the KDF parameters, is associated data for all three encryptions; and a password change leaves the recovery wrap untouched | All three encryptions bind the identity (format, vault ID, username); each copy of the DEK also binds only its own KDF inputs (§4, *Associated data*) | The two design statements contradict each other: a new password salt would change the recovery wrap's associated data, and re-wrapping it needs the recovery key, which the user does not type at `passwd`. Binding each copy to its own inputs keeps T7 and T8 covered and makes the password change possible | T7, T8 |
 
 ### Brief requirements met in a different way
 
@@ -368,20 +386,20 @@ and prove it. The pull request that implements a mitigation fills in its code an
 | T3 password seen while typed | Masked input | #21 | — | — |
 | T4 username enumeration | One generic error; the KDF also runs for unknown usernames | #23 | — | — |
 | T5 recovery key stolen | 160-bit key shown once; using it forces a new password and key | #17, #22, #27 | `crypto.py`: `derive_recovery_kek`; `secrets_gen.py`: `new_recovery_key`, `format_recovery_key`, `parse_recovery_key` | `test_crypto.py`: `test_hkdf_matches_rfc5869_vector`, `test_recovery_kek_known_answer`; `test_secrets_gen.py`: `test_parse_refuses_malformed_input`, `test_format_parse_round_trip` |
-| T6 vault read from disk | AES-256-GCM over the whole body; no plaintext on disk | #16, #20 | `crypto.py`: `encrypt`, `decrypt` | `test_crypto.py`: `test_encrypt_decrypt_round_trip`, `test_decrypt_with_wrong_key_fails`, `test_nonces_are_unique` |
-| T7 header tampering | Header authenticated as AAD; KDF floor and ceiling enforced on load | #16, #20 | `crypto.py`: `KdfParams.check`, AAD in `encrypt`/`decrypt`/`unwrap_dek` | `test_crypto.py`: `test_kdf_params_outside_limits_are_refused`, `test_derive_kek_rechecks_params`, `test_changed_associated_data_fails`, `test_flipped_ciphertext_bit_fails` |
-| T8 vaults swapped between users | Username bound into the AAD | #16, #20, #23 | `crypto.py`: AAD is required and non-empty | `test_crypto.py`: `test_changed_associated_data_fails` (other username), `test_empty_associated_data_is_refused` |
-| T9 rollback | Counter inside the encrypted body, shown after unlock | #20, #23 | — | — |
+| T6 vault read from disk | AES-256-GCM over the whole body; no plaintext on disk | #16, #20 | `crypto.py`: `encrypt`, `decrypt`; `vaultfile.py`: `seal_body`, `open_body` | `test_crypto.py`: `test_encrypt_decrypt_round_trip`, `test_decrypt_with_wrong_key_fails`, `test_nonces_are_unique`; `test_vaultfile.py`: `test_no_entry_text_appears_in_the_file`, `test_every_seal_uses_a_fresh_nonce` |
+| T7 header tampering | KDF inputs authenticated as AAD of their own copy of the DEK; KDF floor and ceiling enforced on load | #16, #20 | `crypto.py`: `KdfParams.check`, AAD in `encrypt`/`decrypt`/`unwrap_dek`; `vaultfile.py`: `parse` (floor and ceiling), `Header.password_aad`, `Header.recovery_aad` | `test_crypto.py`: `test_kdf_params_outside_limits_are_refused`, `test_derive_kek_rechecks_params`, `test_changed_associated_data_fails`, `test_flipped_ciphertext_bit_fails`; `test_vaultfile.py`: `test_weakened_kdf_parameters_are_refused_before_the_kdf_runs`, `test_stronger_kdf_parameters_still_break_the_password_copy`, `test_a_changed_salt_breaks_only_its_own_copy` |
+| T8 vaults swapped between users | Username and vault ID bound into every AAD | #16, #20, #23 | `crypto.py`: AAD is required and non-empty; `vaultfile.py`: `Header.body_aad`, `password_aad`, `recovery_aad` | `test_crypto.py`: `test_changed_associated_data_fails` (other username), `test_empty_associated_data_is_refused`; `test_vaultfile.py`: `test_a_changed_identity_breaks_every_encryption`, `test_parts_of_another_vault_do_not_fit`, `test_associated_data_known_answer` |
+| T9 rollback | Counter inside the encrypted body, shown after unlock | #20, #23 | `vaultfile.py`: `Body.counter`, `parse_body` | `test_vaultfile.py`: `test_body_round_trip`, `test_malformed_bodies_are_refused` |
 | T10 crash during save | Atomic write with a backup copy | #19 | `storage.py`: `DataDir.write`, `_replace`, `_rename_over` | `test_storage.py`: `test_a_crash_at_any_step_leaves_a_complete_file`, `test_an_interrupted_write_cleans_up_and_keeps_the_old_file`, `test_the_backup_holds_the_previous_version` |
 | T11 path traversal, symlinks, hard links | Random file names, allow-lists, links and foreign-owned files refused | #18, #19, #22 | `fsperm.py`: `create_private_file` (`O_EXCL` / `CREATE_NEW`), `check_private_dir` (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`); `storage.py`: `_FILE_NAME` allow-list, `data_dir_path`, `_read_private` (lstat, open, fstat, compare) | `test_fsperm.py`: `test_posix_create_does_not_follow_a_symlink`, `test_posix_symlink_in_place_of_the_directory_is_refused`, `test_windows_junction_in_place_of_the_directory_is_refused`, `test_windows_symlink_in_place_of_the_directory_is_refused`, `test_a_file_in_place_of_the_directory_is_refused`; `test_storage.py`: `test_names_off_the_allow_list_are_refused`, `test_yunarpass_home_must_be_absolute_without_dotdot`, `test_a_symlink_is_refused`, `test_a_hard_link_is_refused`, `test_a_file_swapped_between_the_check_and_the_open_is_refused` |
 | T12 other OS users read files | Owner-only permissions set at creation; checked again on use | #18, #19 | `fsperm.py`: `make_private_dir`, `create_private_file`, `check_private_dir`, `check_private_fd`, `ensure_data_dir`; `storage.py`: `DataDir.open`, `_read_private` | `test_fsperm.py`: `test_posix_new_directory_is_0700`, `test_posix_new_file_is_0600`, `test_windows_acl_is_protected_with_one_entry_for_the_user`, `test_posix_loosened_directory_is_refused`, `test_posix_loosened_file_is_refused`, `test_windows_directory_with_an_entry_for_everyone_is_refused`, `test_windows_directory_with_inherited_entries_is_refused`, `test_windows_null_dacl_is_refused`, `test_*_owned_by_another_user_is_refused`; `test_storage.py`: `test_a_file_open_to_other_users_is_refused`, `test_open_refuses_a_directory_open_to_other_users`, `test_a_written_file_is_private` |
-| T13 secrets read from memory | Short key lifetime; keys in wipeable buffers; DEK zeroed on lock (best effort) | #16, #28; CP3 | `crypto.py`: `derive_kek`/`unwrap_dek` return `bytearray`, `wipe` | `test_crypto.py`: `test_wipe_zeroes_the_buffer_in_place`, `test_wrap_unwrap_round_trip` |
+| T13 secrets read from memory | Short key lifetime; keys in wipeable buffers; DEK zeroed on lock (best effort) | #16, #20, #28; CP3 | `crypto.py`: `derive_kek`/`unwrap_dek` return `bytearray`, `wipe`; `vaultfile.py`: KEKs wiped after every wrap and unwrap, the DEK if `create` fails | `test_crypto.py`: `test_wipe_zeroes_the_buffer_in_place`, `test_wrap_unwrap_round_trip`; `test_vaultfile.py`: `test_unlock_wipes_the_kek`, `test_create_wipes_the_dek_if_it_fails` |
 | T14 secrets in swap or crash dumps | Core dumps disabled where the OS allows | CP3 | — | — |
 | T15 unattended session | `lock` and 5-minute auto-lock | #28 | — | — |
 | T16 secrets in shell history | Secrets only through masked prompts, never as arguments | #21 | — | — |
 | T17 secrets in errors or logs | Generic errors, no tracebacks; logging in CP3 | #18, #19, #21; CP3 | `fsperm.py`, `storage.py`: fixed error messages without paths; OS errors re-raised without the file name | `test_storage.py`: `test_open_reports_a_missing_parent_without_the_path`, `test_a_crash_at_any_step_leaves_a_complete_file`; `test_fsperm.py`: `test_a_file_in_place_of_the_directory_is_refused` |
 | T18 clipboard | 20 s clear; Windows history exclusion; cleared on lock | #25, #28 | — | — |
-| T19 malicious input | Allow-lists, length limits, output sanitizer | #21, #24 | — | — |
+| T19 malicious input | Allow-lists, length limits, output sanitizer; vault files parsed strictly | #20, #21, #24 | `vaultfile.py`: `parse`, `parse_body` | `test_vaultfile.py`: `test_malformed_vaults_are_refused`, `test_duplicate_keys_are_refused`, `test_input_that_is_not_a_json_object_is_refused`, `test_error_messages_do_not_repeat_the_file_content` |
 | T20 predictable generated passwords | `secrets` CSPRNG | #17, #25 | `secrets_gen.py`: `generate_password` | `test_secrets_gen.py`: `test_module_never_imports_random`, `test_classes_are_not_in_fixed_positions`, `test_every_alphabet_character_gets_used`; bandit B311 in CI |
 | T21 password and TOTP secret together | Same protection as the vault; accepted trade-off | CP3 | — | — |
 | T22 SSH key misused from the agent | Key passed via stdin; 10-minute lifetime | CP3 | — | — |
