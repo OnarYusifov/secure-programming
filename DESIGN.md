@@ -321,8 +321,11 @@ immutable and may be copied. This is handled as partial mitigation plus accepted
 | `textual` (CP3) | Full-screen TUI | Modern terminal UI on top of the same core |
 | Standard library: `secrets`, `getpass`, `json`, `os`, `pathlib` | CSPRNG, masked input, parsing, file I/O | No extra dependencies |
 
-Development and CI: `pytest`, `ruff`, `mypy`, `bandit` (static security analysis) and `pip-audit`
-(known vulnerabilities in dependencies). All dependency versions are pinned with hashes (T23, T24).
+Development and CI: `pytest` with `pytest-cov` (branch coverage, at least 80%), `ruff`, `mypy`,
+`bandit` (static security analysis) and `pip-audit` (known vulnerabilities in dependencies). Type
+checks and tests run on Ubuntu and Windows with Python 3.12 and 3.14, because file permissions,
+links and the clipboard behave differently on each OS. All dependency versions are pinned with
+hashes, and the CI actions are pinned by commit (T23, T24).
 
 ## 6. As built
 
@@ -376,6 +379,6 @@ and prove it. The pull request that implements a mitigation fills in its code an
 | T20 predictable generated passwords | `secrets` CSPRNG | #17, #25 | — | — |
 | T21 password and TOTP secret together | Same protection as the vault; accepted trade-off | CP3 | — | — |
 | T22 SSH key misused from the agent | Key passed via stdin; 10-minute lifetime | CP3 | — | — |
-| T23 malicious dependency | Few libraries, pinned; `pip-audit` and secret scanning in CI | #10, #14, #15 | `.github/workflows/ci.yml` (`pip-audit` step) | — |
+| T23 malicious dependency | Few libraries, pinned; `pip-audit` and secret scanning in CI; CI actions pinned by commit SHA | #10, #13, #14, #15 | `.github/workflows/ci.yml` (`pip-audit` step, SHA-pinned actions) | — |
 | T24 tampered install | Dependencies installed with `--require-hashes` | #15 | — | — |
 | T25 password read from the screen | Passwords never printed: `show` masks, `gen` and `copy` use the clipboard | #21, #24, #25 | — | — |

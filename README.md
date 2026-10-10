@@ -97,10 +97,18 @@ Development:
 
 ```sh
 pip install -r requirements-dev.txt
-ruff check . && mypy . && bandit -r src && pytest
+pip install -e .
+ruff check .
+mypy
+bandit -r src
+pytest --cov
 ```
 
-The same checks run in CI on every pull request.
+`pytest --cov` measures branch coverage and fails below 80%; plain `pytest` skips the measurement.
+
+The same checks run in CI on every pull request and every push to `main`: lint and security scans
+once, and type checks and tests on Ubuntu and Windows with Python 3.12 and 3.14. The `ci-ok` job
+passes only when all of them pass, and `main` requires it.
 
 ## Status
 
