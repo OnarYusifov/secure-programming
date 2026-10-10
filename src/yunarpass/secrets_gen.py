@@ -7,6 +7,7 @@ All randomness comes from the `secrets` module (the OS CSPRNG), never from
 import base64
 import re
 import secrets
+import string
 
 from yunarpass.crypto import RECOVERY_KEY_BYTES
 
@@ -48,3 +49,33 @@ def parse_recovery_key(text: str) -> bytes:
     if len(compact) != RECOVERY_KEY_CHARS:
         raise ValueError("not a valid recovery key")
     return base64.b32decode(compact)
+
+
+# --- Password generator (UC5, T20) ----------------------------------------------
+
+# Symbols without quotes, backslash, backtick or space, which web forms and shells
+# often handle badly. 26 + 26 + 10 + 28 = 90 characters, about 6.5 bits each.
+SYMBOLS = "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+CHARACTER_CLASSES = (string.ascii_lowercase, string.ascii_uppercase, string.digits, SYMBOLS)
+ALPHABET = "".join(CHARACTER_CLASSES)
+
+DEFAULT_LENGTH = 20  # about 130 bits
+MIN_LENGTH = 12
+MAX_LENGTH = 128
+
+
+def generate_password(length: int = DEFAULT_LENGTH) -> str:
+    """Return a random password with at least one character from each class.
+
+    Every character is drawn from the whole alphabet, and a candidate that misses
+    a class is thrown away and drawn again (rejection sampling). Forcing, say, a
+    digit into a fixed position would make the passwords easier to guess.
+    """
+    if not isinstance(length, int) or isinstance(length, bool):
+        raise ValueError("length must be a whole number")
+    if not MIN_LENGTH <= length <= MAX_LENGTH:
+        raise ValueError(f"length must be between {MIN_LENGTH} and {MAX_LENGTH}")
+    while True:
+        candidate = "".join(secrets.choice(ALPHABET) for _ in range(length))
+        if all(any(char in cls for char in candidate) for cls in CHARACTER_CLASSES):
+            return candidate

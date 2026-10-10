@@ -1,12 +1,19 @@
 """Tests for the recovery key and the password generator (threats T5, T20)."""
 
+import ast
 import re
+import string
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
+from yunarpass import secrets_gen
 from yunarpass.secrets_gen import (
+    ALPHABET,
+    CHARACTER_CLASSES,
     format_recovery_key,
+    generate_password,
     new_recovery_key,
     parse_recovery_key,
 )
@@ -86,3 +93,65 @@ def test_parse_refuses_non_text() -> None:
 def test_format_refuses_wrong_sizes(raw: bytes) -> None:
     with pytest.raises(ValueError):
         format_recovery_key(raw)
+
+
+# --- Password generator (T20) ------------------------------------------------------
+
+
+def test_default_length_is_20() -> None:
+    assert len(generate_password()) == 20
+
+
+@pytest.mark.parametrize("length", [12, 13, 64, 128])
+def test_lengths_within_bounds(length: int) -> None:
+    assert len(generate_password(length)) == length
+
+
+@pytest.mark.parametrize("length", [0, -1, 11, 129, 10_000, True, 20.0, "20"])
+def test_lengths_out_of_bounds_are_refused(length: int) -> None:
+    with pytest.raises(ValueError):
+        generate_password(length)
+
+
+def test_every_password_has_every_class_and_only_alphabet_characters() -> None:
+    for _ in range(1000):
+        password = generate_password(12)  # the shortest length is the hardest case
+        assert set(password) <= set(ALPHABET)
+        for cls in CHARACTER_CLASSES:
+            assert any(char in cls for char in password)
+
+
+def test_classes_are_not_in_fixed_positions() -> None:
+    # Rejection sampling: any class can appear anywhere, including the first slot.
+    first_chars = {generate_password()[0] for _ in range(2000)}
+    for cls in CHARACTER_CLASSES:
+        assert first_chars & set(cls)
+
+
+def test_every_alphabet_character_gets_used() -> None:
+    seen = set("".join(generate_password() for _ in range(1000)))
+    assert seen == set(ALPHABET)
+
+
+def test_passwords_do_not_repeat() -> None:
+    assert len({generate_password() for _ in range(1000)}) == 1000
+
+
+def test_alphabet_has_no_quotes_backslash_backtick_or_whitespace() -> None:
+    assert not set(ALPHABET) & set("'\"\\` \t\n")
+    assert len(ALPHABET) == len(set(ALPHABET)) == 90
+    assert set(string.ascii_letters + string.digits) <= set(ALPHABET)
+
+
+def test_module_never_imports_random() -> None:
+    # bandit (B311) flags `random` too; this keeps the rule even if bandit's
+    # configuration changes.
+    tree = ast.parse(Path(secrets_gen.__file__).read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "random" not in imported
+    assert "secrets" in imported
