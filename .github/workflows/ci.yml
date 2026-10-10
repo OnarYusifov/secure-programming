@@ -81,3 +81,20 @@ jobs:
 
       - name: Tests with coverage (pytest, at least 80%)
         run: pytest -q --cov
+
+  # The one check that branch protection on main requires. Matrix entries
+  # and new jobs can change without touching the protection rule; they
+  # only need to be listed here.
+  ci-ok:
+    if: always()
+    needs: [checks, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs passed
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          TESTS: ${{ needs.tests.result }}
+        run: |
+          echo "checks: $CHECKS, tests: $TESTS"
+          test "$CHECKS" = success
+          test "$TESTS" = success
