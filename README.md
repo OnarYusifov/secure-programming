@@ -107,6 +107,12 @@ again under a fresh nonce and replaced atomically. If another yunarpass prompt l
 same account has saved in the meantime, the change is refused instead of overwriting the other
 one; log in again to see the newer version.
 
+`passwd` asks for the current master password, then for the new one twice. The new one follows
+the same rules as at registration, and a wrong current password waits like a failed login. Only
+the copy of the vault's data key that the password protects is encrypted again, under a key
+derived from the new password and a new salt: the entries are not touched, and the recovery key
+keeps working.
+
 Checkpoint 2 delivers `register`, `login`, `recover`, the login entries (`add`, `list`, `show`,
 `edit`, `rm`), `copy`, `gen`, `passwd`, `lock` and auto-lock. Checkpoint 3 adds TOTP, SSH keys and a
 full-screen TUI (Textual) on top of the same core. `copy` was planned for Checkpoint 3 but moved
