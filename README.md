@@ -95,6 +95,13 @@ control characters and terminal escape sequences are refused in all of them. `ad
 answer as soon as it is typed and asks for the password twice. `show` prints every field except the
 password, which always appears as `********`, whatever its length.
 
+`copy` and `gen` put a password on the clipboard and say so; the password itself is never shown.
+After 20 seconds yunarpass clears the clipboard, but only if it still holds that password, so
+anything you copied in the meantime stays. Leaving the prompt (`quit`, Ctrl-C, the end of input)
+clears it too. On Windows the copy is marked so that it stays out of the clipboard history (Win+V)
+and the cloud clipboard. Typing `gen` at the password prompt of `add` or `edit` fills in a new
+20-character password without showing it; `copy` then gets it. `gen` takes a length from 12 to 128.
+
 Every change is saved at once: the vault's counter goes up by one, and the vault file is encrypted
 again under a fresh nonce and replaced atomically. If another yunarpass prompt logged in to the
 same account has saved in the meantime, the change is refused instead of overwriting the other
@@ -112,7 +119,9 @@ printing, the clipboard is the only way to get a password out (see
 Requirements: Python 3.12 or newer. Windows 10/11 is the primary platform, used for development
 and the demo; Linux is also supported and tested in CI.
 
-- For `copy` on Linux: `wl-copy` (Wayland) or `xclip` (X11). Windows and macOS need nothing extra.
+- For `copy` and `gen` on Linux: `wl-copy` and `wl-paste` (the `wl-clipboard` package, Wayland) or
+  `xclip` (X11), installed in `/usr/bin`, `/bin` or `/usr/local/bin`; yunarpass does not search
+  `PATH` for them. Windows and macOS need nothing extra.
 - For `ssh-load` (Checkpoint 3): OpenSSH with a running `ssh-agent` (on Windows: the *OpenSSH
   Authentication Agent* service).
 
