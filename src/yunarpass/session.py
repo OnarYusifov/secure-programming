@@ -1,4 +1,4 @@
-"""An unlocked vault (UC2, UC3): the DEK and the entries, held until close().
+"""An unlocked vault (UC2, UC3, UC7, UC8): the DEK and the entries, held until close().
 
 The DEK lives in a bytearray that close() overwrites with zeros (T13, best
 effort: the decrypted entries are ordinary Python objects and cannot be wiped,
@@ -22,7 +22,7 @@ save is refused rather than overwriting that change (T28).
 import dataclasses
 from collections.abc import Iterable
 
-from yunarpass import crypto, entries, policy, vaultfile
+from yunarpass import crypto, entries, policy, secrets_gen, vaultfile
 from yunarpass.clipboard import ClipboardGuard
 from yunarpass.entries import EntryError, EntrySummary, EntryView, LoginEntry
 from yunarpass.storage import DataDir, StorageError, vault_file_name
@@ -169,6 +169,25 @@ class Session:
         policy.check_master_password(new)
         crypto.wipe(vaultfile.unlock_with_password(self.vault, current))
         self._write(vaultfile.rewrap_password(self.vault, self._dek, new))
+
+    def recover(self, recovery_key: bytes, new_password: str) -> str:
+        """Replace the master password and the recovery key, and save (UC8).
+
+        The recovery key must unwrap the DEK first, or CryptoError is raised
+        and nothing changes. Then both copies of the DEK are wrapped again:
+        one under the new password, one under a new random recovery key, so
+        the old password and the old key no longer open the vault (T5). The
+        entries are not encrypted again. Returns the new recovery key,
+        formatted for writing down. Accounts.recover adds the delay after a
+        wrong key; user interfaces call that one.
+        """
+        self._check_open()
+        policy.check_master_password(new_password)
+        crypto.wipe(vaultfile.unlock_with_recovery_key(self.vault, recovery_key))
+        new_key = secrets_gen.new_recovery_key()
+        vault = vaultfile.rewrap_recovery(self.vault, self._dek, new_key)
+        self._write(vaultfile.rewrap_password(vault, self._dek, new_password))
+        return secrets_gen.format_recovery_key(new_key)
 
     # --- Inside ----------------------------------------------------------------------
 
