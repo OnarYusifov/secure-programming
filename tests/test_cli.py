@@ -1,4 +1,4 @@
-"""Tests for the REPL (threats T3, T16, T17, T18, T19, T20, T25, T28, T29)."""
+"""Tests for the REPL (threats T3, T4, T5, T16, T17, T18, T19, T20, T25, T28, T29)."""
 
 import getpass
 import io
@@ -153,6 +153,7 @@ def test_help_lists_the_commands(run: Run) -> None:
         "Commands:\n"
         "  register  Create an account and its vault\n"
         "  login     Unlock your vault\n"
+        "  recover   Unlock with the recovery key and set a new master password\n"
         "  help      Show this list\n"
         "  quit      Exit\n" + cli.PROMPT + "\n"
     )
@@ -980,6 +981,94 @@ def test_passwd_takes_no_arguments(run: Run) -> None:
 
 def test_passwd_needs_an_unlocked_vault(run: Run) -> None:
     assert cli.UNKNOWN_COMMAND in run("passwd").text
+
+
+# --- recover (UC8; T3, T4, T5) -------------------------------------------------------
+
+RECOVER = ("recover", "alice")
+NEW_SECRETS = (NEW_PASSWORD, NEW_PASSWORD)
+
+
+def test_recover_sets_a_new_password_and_shows_a_new_recovery_key(
+    run: Run, accounts: Accounts
+) -> None:
+    old_key = accounts.register("alice", PASSWORD)
+    fake = run(*RECOVER, "", secrets=[old_key, *NEW_SECRETS])
+    assert fake.secret_prompts == [
+        "Recovery key: ",
+        "New master password (at least 12 characters): ",
+        "Repeat the new master password: ",
+    ]
+    assert (
+        "Checking the recovery key...\n\n"
+        "Master password changed. The old recovery key no longer works; this is the new one:\n"
+    ) in fake.text
+    (new_key,) = SHOWN_RECOVERY_KEY.findall(fake.text)
+    assert new_key != old_key
+    assert "It is shown only now and is not stored anywhere." in fake.text
+    assert "Press Enter once you have written it down.Vault unlocked. Saved 0 times.\n" in fake.text
+    assert "yunarpass:alice> " in fake.text  # unlocked
+    for secret in (old_key, PASSWORD, NEW_PASSWORD):
+        assert secret not in fake.text
+    # Only the new password and the new key open the vault now (T5).
+    assert cli.LOGIN_FAILED in unlocked(run).text
+    assert cli.RECOVERY_FAILED in run(*RECOVER, secrets=[old_key, *NEW_SECRETS]).text
+    assert "Vault unlocked." in run("login", "alice", secrets=[NEW_PASSWORD]).text
+    assert "Vault unlocked." in run(*RECOVER, "", secrets=[new_key, *NEW_SECRETS]).text
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize(
+    ("username", "key"),
+    [("alice", "A" * 32), ("alice", "not a recovery key"), ("bob", "A" * 32)],
+)
+def test_a_failed_recovery_looks_the_same_whatever_the_cause(
+    run: Run, username: str, key: str
+) -> None:
+    fake = run("recover", username, secrets=[key, *NEW_SECRETS])
+    assert fake.text.endswith(
+        f"Checking the recovery key...\n{cli.RECOVERY_FAILED}\n{cli.PROMPT}\n"
+    )
+    assert key not in fake.text
+    assert "Vault unlocked." in unlocked(run).text  # nothing changed
+
+
+@pytest.mark.usefixtures("alice")
+def test_recover_checks_the_policy_before_asking_again(run: Run) -> None:
+    fake = run(*RECOVER, secrets=["A" * 32, "unbelievable"])
+    assert "Error: the master password is one of the 10 000 most common passwords.\n" in fake.text
+    assert "Repeat the new master password: " not in fake.text
+    assert "Checking" not in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_recover_refuses_two_different_new_passwords(run: Run) -> None:
+    fake = run(*RECOVER, secrets=["A" * 32, NEW_PASSWORD, NEW_PASSWORD + "!"])
+    assert "Error: the two new passwords are different, so nothing was changed.\n" in fake.text
+    assert "Checking" not in fake.text
+
+
+def test_recover_takes_no_arguments(run: Run) -> None:
+    fake = run("recover AAAA-BBBB-CCCC")
+    assert "Error: recover takes no arguments.\n" in fake.text
+    assert "AAAA" not in fake.text
+    assert fake.secret_prompts == []
+
+
+@pytest.mark.usefixtures("alice")
+def test_recover_is_not_offered_once_unlocked(run: Run) -> None:
+    fake = unlocked(run, "recover")
+    assert cli.UNKNOWN_COMMAND in fake.text
+
+
+def test_ctrl_c_after_the_new_key_is_shown_keeps_the_vault_unlocked(
+    run: Run, accounts: Accounts
+) -> None:
+    key = accounts.register("alice", PASSWORD)
+    fake = run(*RECOVER, KeyboardInterrupt(), secrets=[key, *NEW_SECRETS])
+    assert "Cancelled." not in fake.text
+    assert "Vault unlocked. Saved 0 times.\n" in fake.text
+    assert "Vault unlocked." in run("login", "alice", secrets=[NEW_PASSWORD]).text
 
 
 # --- Entries with the same name, and IDs (T29) ---------------------------------------

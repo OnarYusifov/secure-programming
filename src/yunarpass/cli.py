@@ -40,6 +40,7 @@ MAX_LINE = 256  # characters in one command line
 
 PROMPT = "yunarpass> "
 LOGIN_FAILED = "Login failed."
+RECOVERY_FAILED = "Recovery failed."
 GENERIC_ERROR = "Something went wrong and the command did not complete."
 UNKNOWN_COMMAND = "Unknown command. Type help to see the commands."
 
@@ -114,6 +115,9 @@ class Repl:
             return {
                 "register": Command(self.register, "Create an account and its vault"),
                 "login": Command(self.login, "Unlock your vault"),
+                "recover": Command(
+                    self.recover, "Unlock with the recovery key and set a new master password"
+                ),
                 "help": Command(self.help, "Show this list"),
                 "quit": Command(self.quit, "Exit"),
             }
@@ -202,9 +206,14 @@ class Repl:
         self.say("Creating the vault...")
         recovery_key = self.accounts.register(username, password)
         del password
+        self._show_recovery_key("Account created. This is your recovery key:", recovery_key)
+        self.say("", "Log in with: login")
+
+    def _show_recovery_key(self, heading: str, recovery_key: str) -> None:
+        """Print a recovery key, the one time it is shown, and wait until it is written down."""
         self.say(
             "",
-            "Account created. This is your recovery key:",
+            heading,
             "",
             f"    {recovery_key}",
             "",
@@ -212,10 +221,10 @@ class Repl:
             "password, it is the only way back into your vault, and anyone who has it can",
             "open the vault. It is shown only now and is not stored anywhere.",
         )
-        # Pressing Ctrl-C here must not report the account as cancelled.
+        # Pressing Ctrl-C here must not report the command as cancelled: it
+        # has already been carried out.
         with contextlib.suppress(EOFError, KeyboardInterrupt):
             self.console.read_line("Press Enter once you have written it down.")
-        self.say("", "Log in with: login")
 
     def login(self, args: str) -> None:
         _no_arguments("login", args)
@@ -230,9 +239,39 @@ class Repl:
             return
         finally:
             del password
-        saved = self.session.counter
+        self._say_unlocked(self.session)
+
+    def _say_unlocked(self, session: Session) -> None:
+        saved = session.counter
         # The counter lets the user notice an older copy put back in place (T9).
         self.say(f"Vault unlocked. Saved {saved} {'time' if saved == 1 else 'times'}.")
+
+    def recover(self, args: str) -> None:
+        _no_arguments("recover", args)
+        username = self.console.read_line("Username: ").strip()
+        # Masked like a password: whoever sees the key can open the vault (T5).
+        key = self.console.read_secret("Recovery key: ")
+        new = self.console.read_secret(
+            f"New master password (at least {policy.MIN_LENGTH} characters): "
+        )
+        policy.check_master_password(new)
+        if self.console.read_secret("Repeat the new master password: ") != new:
+            raise UsageError("the two new passwords are different, so nothing was changed")
+        self.say("Checking the recovery key...")
+        try:
+            self.session, recovery_key = self.accounts.recover(username, key, new)
+        except LoginError:
+            # One message for an unknown user, a wrong or malformed key and a
+            # damaged vault (T4).
+            self.say(RECOVERY_FAILED)
+            return
+        finally:
+            del key, new
+        self._show_recovery_key(
+            "Master password changed. The old recovery key no longer works; this is the new one:",
+            recovery_key,
+        )
+        self._say_unlocked(self.session)
 
     def _unlocked(self) -> Session:
         if self.session is None:
