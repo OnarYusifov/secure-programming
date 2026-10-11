@@ -73,7 +73,11 @@ def _no_constants(name: str) -> NoReturn:
     raise VaultFormatError("NaN and Infinity are not allowed")
 
 
-def _load_json(data: bytes) -> object:
+def load_json(data: bytes) -> object:
+    """Parse UTF-8 JSON strictly: no duplicate keys, no NaN or Infinity, at most 8 MiB.
+
+    Also used for users.json, so both data files follow the same rules.
+    """
     if not isinstance(data, bytes):
         raise VaultFormatError("not bytes")
     if len(data) > MAX_VAULT_BYTES:
@@ -85,7 +89,8 @@ def _load_json(data: bytes) -> object:
         raise VaultFormatError("not valid JSON") from None
 
 
-def _fields(value: object, names: frozenset[str], where: str) -> dict[str, object]:
+def fields(value: object, names: frozenset[str], where: str) -> dict[str, object]:
+    """Return value if it is a JSON object with exactly these field names."""
     if not isinstance(value, dict) or value.keys() != names:
         raise VaultFormatError(f"{where}: unknown or missing fields")
     return value
@@ -221,14 +226,14 @@ class VaultFile:
 
 def parse(data: bytes) -> VaultFile:
     """Parse a vault file strictly. Raises VaultFormatError on anything unexpected."""
-    doc = _load_json(data)
+    doc = load_json(data)
     if not isinstance(doc, dict):
         raise VaultFormatError("vault: not a JSON object")
     # The version first: a later format may differ in any other field.
     _int(doc.get("format"), FORMAT_VERSION, FORMAT_VERSION, "format")
-    _fields(doc, _TOP_FIELDS, "vault")
+    fields(doc, _TOP_FIELDS, "vault")
 
-    kdf = _fields(doc["kdf"], _KDF_FIELDS, "kdf")
+    kdf = fields(doc["kdf"], _KDF_FIELDS, "kdf")
     if kdf["alg"] != KDF_ALGORITHM:
         raise VaultFormatError("kdf.alg: not supported")
     # The floor and ceiling are checked here, before the KDF can ever run on
@@ -240,10 +245,10 @@ def parse(data: bytes) -> VaultFile:
         salt=_b64(kdf["salt"], "kdf.salt", size=crypto.SALT_BYTES),
     )
 
-    wrapped = _fields(doc["wrapped_dek"], _WRAPPED_FIELDS, "wrapped_dek")
-    password = _fields(wrapped["password"], _SEALED_FIELDS, "wrapped_dek.password")
-    recovery = _fields(wrapped["recovery"], _RECOVERY_FIELDS, "wrapped_dek.recovery")
-    body = _fields(doc["body"], _SEALED_FIELDS, "body")
+    wrapped = fields(doc["wrapped_dek"], _WRAPPED_FIELDS, "wrapped_dek")
+    password = fields(wrapped["password"], _SEALED_FIELDS, "wrapped_dek.password")
+    recovery = fields(wrapped["recovery"], _RECOVERY_FIELDS, "wrapped_dek.recovery")
+    body = fields(doc["body"], _SEALED_FIELDS, "body")
 
     header = Header(
         vault_id=_text(doc["vault_id"], VAULT_ID, "vault_id"),
@@ -310,7 +315,7 @@ class Body:
 
 def parse_body(plaintext: bytes) -> Body:
     """Parse a decrypted body as strictly as the file around it."""
-    doc = _fields(_load_json(plaintext), _BODY_FIELDS, "body")
+    doc = fields(load_json(plaintext), _BODY_FIELDS, "body")
     entries = doc["entries"]
     if not isinstance(entries, list):
         raise VaultFormatError("entries: not a list of objects")
