@@ -19,6 +19,10 @@ yunarpass = "yunarpass.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The common-password list and its licence (policy.py).
+[tool.setuptools.package-data]
+yunarpass = ["data/*"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
