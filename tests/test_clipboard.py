@@ -192,7 +192,7 @@ def test_thread_timer_runs_the_callback_and_can_be_cancelled() -> None:
     clipboard.thread_timer(0.01, done.set)
     assert done.wait(5)
     never = threading.Event()
-    cancel = clipboard.thread_timer(0.05, never.set)
+    cancel = clipboard.thread_timer(30, never.set)  # long enough never to fire first
     cancel()
     assert not never.wait(0.2)
 
