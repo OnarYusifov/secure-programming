@@ -485,6 +485,7 @@ def test_unlocked_the_prompt_offers_only_the_unlocked_commands(run: Run) -> None
         "  edit <name>   Change an entry\n"
         "  rm <name>     Delete an entry\n"
         "  gen [length]  Copy a new random password to the clipboard\n"
+        "  passwd        Change the master password\n"
         "  help          Show this list\n"
         "  quit          Lock the vault and exit\n"
     ) in fake.text
@@ -918,3 +919,61 @@ def test_gen_at_the_edit_password_prompt_replaces_the_password(
     assert len(new) == 20
     assert new not in fake.text
     assert clipboard.backend.written == []  # filled in, not copied
+
+
+# --- passwd (UC7; T1, T2, T3) ---------------------------------------------------------
+
+NEW_PASSWORD = "a brand new passphrase"
+
+
+@pytest.mark.usefixtures("alice")
+def test_passwd_changes_the_master_password(run: Run) -> None:
+    fake = unlocked(run, "passwd", secrets=[PASSWORD, NEW_PASSWORD, NEW_PASSWORD])
+    assert fake.secret_prompts == [
+        "Master password: ",
+        "Current master password: ",
+        "New master password (at least 12 characters): ",
+        "Repeat the new master password: ",
+    ]
+    assert (
+        "Changing the master password...\n"
+        "Master password changed. Your recovery key stays the same.\n"
+    ) in fake.text
+    for secret in (PASSWORD, NEW_PASSWORD):
+        assert secret not in fake.text
+    assert cli.LOGIN_FAILED in unlocked(run).text  # the old password no longer works
+    assert "Vault unlocked." in run("login", "alice", secrets=[NEW_PASSWORD]).text
+
+
+@pytest.mark.usefixtures("alice")
+def test_passwd_refuses_a_wrong_current_password(run: Run) -> None:
+    fake = unlocked(run, "passwd", secrets=["a wrong password", NEW_PASSWORD, NEW_PASSWORD])
+    assert "Error: the current master password is wrong, so it was not changed.\n" in fake.text
+    assert "Vault unlocked." in unlocked(run).text  # the old one still works
+
+
+@pytest.mark.usefixtures("alice")
+def test_passwd_checks_the_policy_before_asking_again(run: Run) -> None:
+    fake = unlocked(run, "passwd", secrets=[PASSWORD, "unbelievable"])
+    assert "Error: the master password is one of the 10 000 most common passwords.\n" in fake.text
+    assert "Repeat the new master password: " not in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_passwd_refuses_two_different_new_passwords(run: Run) -> None:
+    fake = unlocked(run, "passwd", secrets=[PASSWORD, NEW_PASSWORD, NEW_PASSWORD + "!"])
+    assert "Error: the two new passwords are different, so nothing was changed.\n" in fake.text
+    assert "Changing" not in fake.text
+    assert "Vault unlocked." in unlocked(run).text
+
+
+@pytest.mark.usefixtures("alice")
+def test_passwd_takes_no_arguments(run: Run) -> None:
+    fake = unlocked(run, f"passwd {NEW_PASSWORD}")
+    assert "Error: passwd takes no arguments.\n" in fake.text
+    assert NEW_PASSWORD not in fake.text
+    assert fake.secret_prompts == ["Master password: "]
+
+
+def test_passwd_needs_an_unlocked_vault(run: Run) -> None:
+    assert cli.UNKNOWN_COMMAND in run("passwd").text

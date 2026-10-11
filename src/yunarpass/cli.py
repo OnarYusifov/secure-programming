@@ -123,6 +123,7 @@ class Repl:
             "edit": Command(self.edit, "Change an entry", "<name>"),
             "rm": Command(self.rm, "Delete an entry", "<name>"),
             "gen": Command(self.gen, "Copy a new random password to the clipboard", "[length]"),
+            "passwd": Command(self.passwd, "Change the master password"),
             "help": Command(self.help, "Show this list"),
             "quit": Command(self.quit, "Lock the vault and exit"),
         }
@@ -356,6 +357,23 @@ class Repl:
             f"Copied a new {length}-character password. "
             f"The clipboard is cleared in {self.clipboard.seconds:g} seconds."
         )
+
+    def passwd(self, args: str) -> None:
+        _no_arguments("passwd", args)
+        session = self._unlocked()
+        current = self.console.read_secret("Current master password: ")
+        new = self.console.read_secret(
+            f"New master password (at least {policy.MIN_LENGTH} characters): "
+        )
+        policy.check_master_password(new)
+        if self.console.read_secret("Repeat the new master password: ") != new:
+            raise UsageError("the two new passwords are different, so nothing was changed")
+        self.say("Changing the master password...")
+        # The current password is checked here, in the same call: no
+        # interface can change the password without it.
+        self.accounts.change_password(session, current, new)
+        del current, new
+        self.say("Master password changed. Your recovery key stays the same.")
 
     def help(self, args: str) -> None:
         _no_arguments("help", args)
