@@ -11,7 +11,7 @@ from typing import Protocol
 
 import pytest
 
-from yunarpass import __version__, cli, entries, secrets_gen, storage, vaultfile
+from yunarpass import __version__, cli, crypto, entries, secrets_gen, storage, vaultfile
 from yunarpass.cli import Console, Repl
 from yunarpass.clipboard import ClipboardError, ClipboardGuard, NoClipboard
 from yunarpass.session import Session, VaultLockedError
@@ -488,6 +488,7 @@ def test_unlocked_the_prompt_offers_only_the_unlocked_commands(run: Run) -> None
         "  rm <name or ID>    Delete an entry\n"
         "  gen [length]       Copy a new random password to the clipboard\n"
         "  passwd             Change the master password\n"
+        "  lock               Lock the vault and clear the clipboard\n"
         "  help               Show this list\n"
         "  quit               Lock the vault and exit\n"
     ) in fake.text
@@ -1069,6 +1070,52 @@ def test_ctrl_c_after_the_new_key_is_shown_keeps_the_vault_unlocked(
     assert "Cancelled." not in fake.text
     assert "Vault unlocked. Saved 0 times.\n" in fake.text
     assert "Vault unlocked." in run("login", "alice", secrets=[NEW_PASSWORD]).text
+
+
+# --- lock (UC6; T13, T18) ------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("alice")
+def test_lock_wipes_the_dek_drops_the_entries_and_clears_the_clipboard(
+    accounts: Accounts, clipboard: Clipboard
+) -> None:
+    fake = FakeConsole(["alice", *ADD_GITHUB[1:]], [PASSWORD, SECRET, SECRET])
+    repl = Repl(accounts, fake.console(), clipboard.guard)
+    for line in ("login", ADD_GITHUB[0], "copy github"):
+        repl.execute(line)
+    session = repl.session
+    assert session is not None
+    dek = session._dek
+    assert clipboard.backend.text == SECRET
+    repl.execute("lock")
+    assert dek == bytearray(crypto.KEY_BYTES)  # zeroed in place
+    assert session._entries == {}
+    assert session.closed
+    assert clipboard.backend.text is None
+    assert repl.session is None
+    assert repl.prompt == cli.PROMPT
+    assert fake.text.endswith("Vault locked.\n")
+    repl.execute("list")  # an unlocked command is refused now
+    assert fake.text.endswith(cli.UNKNOWN_COMMAND + "\n")
+
+
+@pytest.mark.usefixtures("alice")
+def test_lock_returns_to_the_login_prompt(run: Run) -> None:
+    fake = unlocked(run, "lock", "login", "alice", "list", secrets=[PASSWORD])
+    assert f"Vault locked.\n{cli.PROMPT}Username: " in fake.text
+    assert fake.text.count("Vault unlocked.") == 2
+    assert "The vault is empty." in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_lock_takes_no_arguments(run: Run) -> None:
+    fake = unlocked(run, "lock now", "list")
+    assert "Error: lock takes no arguments.\n" in fake.text
+    assert "The vault is empty." in fake.text  # still unlocked
+
+
+def test_lock_needs_an_unlocked_vault(run: Run) -> None:
+    assert cli.UNKNOWN_COMMAND in run("lock").text
 
 
 # --- Entries with the same name, and IDs (T29) ---------------------------------------
