@@ -36,6 +36,14 @@ Passwords are never printed. `show` masks them, `gen` puts a new password in the
 straight into an entry, and `copy` is the way to use a stored password. The only secret the tool
 ever prints is the recovery key, once, because the user has to write it down.
 
+The prompt accepts only the commands listed by `help`, and a line of at most 256 characters. An
+empty line does nothing (it never repeats the last command), and an unknown command is not printed
+back, in case it was a password typed at the wrong prompt. Text that comes from a user or a file is
+printed without control characters, terminal escape sequences or bidirectional controls, so it
+cannot clear the screen, move the cursor or disguise itself. Errors are short messages, never a
+traceback. Ctrl-C cancels the command in progress; at the prompt, Ctrl-C or the end of input (Ctrl-D,
+or Ctrl-Z then Enter on Windows) exits. The program itself takes no command-line arguments.
+
 Before unlocking:
 
 | Command | Action |
@@ -109,7 +117,8 @@ python3 -m venv .venv
 .venv/bin/python -m yunarpass
 ```
 
-The commands call the virtual environment's Python directly, so no activation script is needed.
+The last line starts the prompt; type `help` there to see the commands. The commands call the
+virtual environment's Python directly, so no activation script is needed.
 CI runs these blocks verbatim on fresh Windows and Linux machines on every change (`readme-smoke`).
 
 Data is stored in `~/.yunarpass/` (override with the `YUNARPASS_HOME` environment variable).
