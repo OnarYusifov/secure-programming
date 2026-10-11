@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from yunarpass import crypto, fsperm, secrets_gen, storage, users, vaultfile
+from yunarpass import crypto, entries, fsperm, secrets_gen, storage, users, vaultfile
 from yunarpass.crypto import KdfParams
 from yunarpass.policy import PolicyError
 from yunarpass.storage import USERS_FILE, DataDir, StorageError
@@ -329,21 +329,57 @@ def test_the_right_password_unlocks_the_vault(accounts: Accounts) -> None:
     session = accounts.login("alice", PASSWORD)
     assert session.username == "alice"
     assert session.counter == 0
-    assert session.body == Body()
+    assert session.summaries() == []
     assert not session.closed
+
+
+def save_body(accounts: Accounts, username: str, body: Body) -> None:
+    """Write a body into a user's vault, as a session would."""
+    vault = vault_of(accounts, username)
+    dek = vaultfile.unlock_with_password(vault, PASSWORD)
+    sealed = vaultfile.seal_body(vault.header, dek, body)
+    saved = VaultFile(vault.header, vault.password_dek, vault.recovery_dek, sealed)
+    name = storage.vault_file_name(vault.header.vault_id)
+    accounts.data_dir.write(name, vaultfile.serialize(saved))
+
+
+GITHUB = entries.new_login(
+    "github", username="alice", password="s3cret-Password!", url="", notes=""
+).to_json()
 
 
 def test_login_reads_the_saved_counter_and_entries(accounts: Accounts) -> None:
     accounts.register("alice", PASSWORD)
-    vault = vault_of(accounts, "alice")
-    dek = vaultfile.unlock_with_password(vault, PASSWORD)
-    body = vaultfile.seal_body(vault.header, dek, Body(41, ({"name": "github"},)))
-    saved = VaultFile(vault.header, vault.password_dek, vault.recovery_dek, body)
-    name = storage.vault_file_name(vault.header.vault_id)
-    accounts.data_dir.write(name, vaultfile.serialize(saved))
+    save_body(accounts, "alice", Body(41, (GITHUB,)))
     session = accounts.login("alice", PASSWORD)
     assert session.counter == 41
-    assert session.body.entries == ({"name": "github"},)
+    assert session.summaries() == [("github", "login")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        Body(1, ({"name": "github"},)),  # fields missing
+        Body(1, ({**GITHUB, "type": "totp"},)),  # a type this version does not know
+        Body(2, (GITHUB, {**GITHUB, "name": "GitHub"})),  # the same name twice
+    ],
+)
+def test_a_body_with_a_malformed_entry_fails_and_its_dek_is_wiped(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch, body: Body
+) -> None:
+    accounts.register("alice", PASSWORD)
+    save_body(accounts, "alice", body)
+    deks: list[bytearray] = []
+    unlock = vaultfile.unlock_with_password
+
+    def keep_dek(vault: VaultFile, password: str) -> bytearray:
+        deks.append(unlock(vault, password))
+        return deks[-1]
+
+    monkeypatch.setattr(vaultfile, "unlock_with_password", keep_dek)
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+    assert deks == [bytearray(crypto.KEY_BYTES)]
 
 
 @pytest.mark.parametrize(

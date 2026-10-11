@@ -177,12 +177,13 @@ class Accounts:
         except CryptoError:
             self._fail()
         try:
-            body = vaultfile.open_body(vault, dek)
+            # The session checks every entry, as strictly as the file (T19).
+            session = Session(vault, dek, vaultfile.open_body(vault, dek), self.data_dir)
         except (CryptoError, VaultFormatError):
             crypto.wipe(dek)
             self._fail()
         self.backoff.succeeded()
-        return Session(vault, dek, body)
+        return session
 
     def _find_vault(self, username: str) -> VaultFile | None:
         """The user's vault, or None if there is no usable one."""
