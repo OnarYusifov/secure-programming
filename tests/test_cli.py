@@ -12,7 +12,7 @@ import pytest
 
 from yunarpass import __version__, cli, entries, storage, vaultfile
 from yunarpass.cli import Console, Repl
-from yunarpass.session import Session
+from yunarpass.session import Session, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
 from yunarpass.users import AccountError, Accounts, Backoff
 from yunarpass.vaultfile import Body
@@ -717,3 +717,20 @@ def test_two_prompts_do_not_overwrite_each_others_entries(accounts: Accounts) ->
         "so this change was not saved; log in again to continue.\n"
     ) in two.text
     assert [s.name for s in accounts.login("alice", PASSWORD).summaries()] == ["github"]
+
+
+@pytest.mark.usefixtures("alice")
+def test_edit_can_change_only_the_case_of_the_name(run: Run) -> None:
+    fake = unlocked(
+        run, *ADD_GITHUB, "edit github", "GitHub", "", "", "", "list", secrets=[SECRET, SECRET, ""]
+    )
+    assert "Saved the changes to GitHub.\n" in fake.text
+    assert "  GitHub  login\n" in fake.text
+
+
+def test_entry_commands_need_an_unlocked_vault(accounts: Accounts) -> None:
+    # Not reachable from the prompt, whose allow-list has no entry commands
+    # while locked; this is the check behind it.
+    repl = Repl(accounts, FakeConsole().console())
+    with pytest.raises(VaultLockedError):
+        repl.add("github")
