@@ -17,6 +17,7 @@ do not fit a password manager: an empty line repeats the last command, an
 unknown command is printed back, and command names cannot contain a dash.
 """
 
+import contextlib
 import getpass
 import re
 import sys
@@ -25,8 +26,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from yunarpass import __version__
-from yunarpass.storage import StorageError
+from yunarpass import __version__, policy
+from yunarpass.policy import PolicyError
+from yunarpass.storage import DataDir, StorageError
+from yunarpass.users import AccountError, Accounts
 
 MAX_LINE = 256  # characters in one command line
 
@@ -87,7 +90,7 @@ class UsageError(Exception):
 
 # Errors whose messages are fixed strings written to be shown to the user.
 # Anything else is unexpected, and only the generic message is shown.
-_SAFE_ERRORS = (UsageError, StorageError)
+_SAFE_ERRORS = (UsageError, StorageError, AccountError, PolicyError)
 
 
 class Command(NamedTuple):
@@ -98,7 +101,8 @@ class Command(NamedTuple):
 class Repl:
     """The read-eval-print loop."""
 
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(self, accounts: Accounts, console: Console | None = None) -> None:
+        self.accounts = accounts
         self.console = Console() if console is None else console
         self.running = False
 
@@ -109,6 +113,7 @@ class Repl:
     def commands(self) -> dict[str, Command]:
         """The allow-list: the commands of the current state."""
         return {
+            "register": Command(self.register, "Create an account and its vault"),
             "help": Command(self.help, "Show this list"),
             "quit": Command(self.quit, "Exit"),
         }
@@ -153,6 +158,34 @@ class Repl:
         except Exception:
             self.say(GENERIC_ERROR)
 
+    def register(self, args: str) -> None:
+        _no_arguments("register", args)
+        username = self.console.read_line("Username: ").strip()
+        # Checked before the password is typed, so a taken name costs no typing.
+        self.accounts.check_new_username(username)
+        password = self.console.read_secret(
+            f"Master password (at least {policy.MIN_LENGTH} characters): "
+        )
+        policy.check_master_password(password)
+        if self.console.read_secret("Repeat the master password: ") != password:
+            raise UsageError("the two passwords are different, so nothing was created")
+        self.say("Creating the vault...")
+        recovery_key = self.accounts.register(username, password)
+        del password
+        self.say(
+            "",
+            "Account created. This is your recovery key:",
+            "",
+            f"    {recovery_key}",
+            "",
+            "Write it down on paper and keep it somewhere safe. If you forget the master",
+            "password, it is the only way back into your vault, and anyone who has it can",
+            "open the vault. It is shown only now and is not stored anywhere.",
+        )
+        # Pressing Ctrl-C here must not report the account as cancelled.
+        with contextlib.suppress(EOFError, KeyboardInterrupt):
+            self.console.read_line("Press Enter once you have written it down.")
+
     def help(self, args: str) -> None:
         _no_arguments("help", args)
         commands = self.commands()
@@ -193,7 +226,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(USAGE, end="", file=sys.stderr)
         return 2
     try:
-        return Repl().run()
+        # Created owner-only, or checked and refused if it is a link or open to
+        # other users, before anything else happens.
+        accounts = Accounts(DataDir.open())
+    except StorageError as error:
+        print(f"Error: {error}.", file=sys.stderr)
+        return 1
+    try:
+        return Repl(accounts).run()
     except KeyboardInterrupt:
         print()
         return 0

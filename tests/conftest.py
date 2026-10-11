@@ -38,3 +38,11 @@ def _grant_others_read(path: Path) -> None:
 @pytest.fixture
 def grant_others_read() -> Callable[[Path], None]:
     return _grant_others_read
+
+
+@pytest.fixture(autouse=True)
+def _no_real_data_dir(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point YUNARPASS_HOME at a fresh directory, so no test touches ~/.yunarpass."""
+    monkeypatch.setenv("YUNARPASS_HOME", str(tmp_path_factory.mktemp("home") / "data"))

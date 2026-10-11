@@ -2,14 +2,18 @@
 
 import getpass
 import io
+import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from pathlib import Path
+from typing import Protocol
 
 import pytest
 
-from yunarpass import __version__, cli
+from yunarpass import __version__, cli, storage
 from yunarpass.cli import Console, Repl
-from yunarpass.storage import StorageError
+from yunarpass.storage import DataDir, StorageError
+from yunarpass.users import AccountError, Accounts
 
 type Typed = str | BaseException
 
@@ -54,44 +58,65 @@ class FakeConsole:
         return "".join(self.output)
 
 
-def run(*lines: Typed) -> FakeConsole:
-    fake = FakeConsole(lines)
-    assert Repl(fake.console()).run() == 0
-    return fake
+class Run(Protocol):
+    def __call__(self, *lines: Typed, secrets: Iterable[Typed] = ()) -> FakeConsole: ...
+
+
+@pytest.fixture
+def accounts(tmp_path: Path) -> Accounts:
+    return Accounts(DataDir.open(tmp_path / "data"))
+
+
+@pytest.fixture
+def run(accounts: Accounts) -> Run:
+    """Run the REPL on typed lines and secrets until the input runs out."""
+
+    def run_repl(*lines: Typed, secrets: Iterable[Typed] = ()) -> FakeConsole:
+        fake = FakeConsole(lines, secrets)
+        assert Repl(accounts, fake.console()).run() == 0
+        return fake
+
+    return run_repl
 
 
 # --- The loop ----------------------------------------------------------------------
 
 
-def test_starts_with_a_banner_then_the_prompt() -> None:
+def test_starts_with_a_banner_then_the_prompt(run: Run) -> None:
     fake = run()
     assert fake.output[0] == f"yunarpass {__version__}. Type help to see the commands.\n"
     assert fake.output[1] == cli.PROMPT
 
 
-def test_help_lists_the_commands() -> None:
+def test_help_lists_the_commands(run: Run) -> None:
     fake = run("help")
-    assert "Commands:\n  help  Show this list\n  quit  Exit\n" in fake.text
+    assert fake.text.endswith(
+        "Commands:\n"
+        "  register  Create an account and its vault\n"
+        "  help      Show this list\n"
+        "  quit      Exit\n" + cli.PROMPT + "\n"
+    )
 
 
-def test_quit_stops_reading() -> None:
+def test_quit_stops_reading(run: Run) -> None:
     fake = run("quit", "help")
     assert "Commands:" not in fake.text
     assert fake.text.count(cli.PROMPT) == 1
 
 
-def test_end_of_input_exits_cleanly() -> None:
+def test_end_of_input_exits_cleanly(run: Run) -> None:
     fake = run("help")
     assert fake.text.endswith(cli.PROMPT + "\n")
 
 
-def test_ctrl_c_at_the_prompt_exits_cleanly() -> None:
+def test_ctrl_c_at_the_prompt_exits_cleanly(run: Run) -> None:
     fake = run(KeyboardInterrupt(), "help")
     assert "Commands:" not in fake.text
     assert fake.text.endswith(cli.PROMPT + "\n")
 
 
 def test_ctrl_c_inside_a_command_cancels_only_that_command(
+    run: Run,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def interrupted(self: Repl, args: str) -> None:
@@ -103,7 +128,7 @@ def test_ctrl_c_inside_a_command_cancels_only_that_command(
     assert fake.text.count(cli.PROMPT) == 2  # it went on to read "quit"
 
 
-def test_an_empty_line_does_not_repeat_the_last_command() -> None:
+def test_an_empty_line_does_not_repeat_the_last_command(run: Run) -> None:
     fake = run("help", "", "   ")
     assert fake.text.count("Commands:") == 1
 
@@ -123,24 +148,24 @@ def test_an_empty_line_does_not_repeat_the_last_command() -> None:
         "\x1b[2Jhelp",
     ],
 )
-def test_an_unknown_command_is_refused_and_not_echoed(line: str) -> None:
+def test_an_unknown_command_is_refused_and_not_echoed(run: Run, line: str) -> None:
     fake = run(line)
     assert cli.UNKNOWN_COMMAND in fake.text
     assert line not in fake.text
 
 
-def test_an_overlong_line_is_refused_before_it_is_parsed() -> None:
+def test_an_overlong_line_is_refused_before_it_is_parsed(run: Run) -> None:
     fake = run("help" + " " * cli.MAX_LINE)
     assert f"Error: a line can be at most {cli.MAX_LINE} characters." in fake.text
     assert "Commands:" not in fake.text
 
 
-def test_a_line_of_exactly_the_maximum_length_is_accepted() -> None:
+def test_a_line_of_exactly_the_maximum_length_is_accepted(run: Run) -> None:
     fake = run("help".ljust(cli.MAX_LINE))
     assert "Commands:" in fake.text
 
 
-def test_arguments_to_a_command_that_takes_none_are_refused_and_not_echoed() -> None:
+def test_arguments_to_a_command_that_takes_none_are_refused_and_not_echoed(run: Run) -> None:
     fake = run("quit correct-horse-battery-staple", "help")
     assert "Error: quit takes no arguments." in fake.text
     assert "correct-horse" not in fake.text
@@ -150,7 +175,9 @@ def test_arguments_to_a_command_that_takes_none_are_refused_and_not_echoed() -> 
 # --- Errors (T17) --------------------------------------------------------------------
 
 
-def test_an_unexpected_error_gives_the_generic_message(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unexpected_error_gives_the_generic_message(
+    run: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def broken(self: Repl, args: str) -> None:
         raise RuntimeError("detail: C:\\Users\\alice\\.yunarpass, key 00ff")
 
@@ -162,7 +189,9 @@ def test_an_unexpected_error_gives_the_generic_message(monkeypatch: pytest.Monke
     assert fake.text.count(cli.PROMPT) == 2  # still running
 
 
-def test_an_error_written_for_the_user_shows_its_message(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_error_written_for_the_user_shows_its_message(
+    run: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def refused(self: Repl, args: str) -> None:
         raise StorageError("a data file is too large")
 
@@ -197,9 +226,9 @@ def test_sanitize_removes_escape_sequences_and_control_characters(raw: str, show
     assert cli.sanitize(raw) == shown
 
 
-def test_every_printed_line_is_sanitized() -> None:
+def test_every_printed_line_is_sanitized(accounts: Accounts) -> None:
     fake = FakeConsole()
-    Repl(fake.console()).say("\x1b[2Jfirst", "second\x1b]0;title\x07\r\n")
+    Repl(accounts, fake.console()).say("\x1b[2Jfirst", "second\x1b]0;title\x07\r\n")
     assert fake.text == "first\nsecond\n"
 
 
@@ -255,3 +284,100 @@ def test_main_exits_cleanly_on_ctrl_c_outside_a_command(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(Repl, "run", interrupted)
     assert cli.main([]) == 0
+
+
+def test_main_refuses_a_data_directory_open_to_other_users(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    grant_others_read: Callable[[Path], None],
+) -> None:
+    data = tmp_path / "data"
+    DataDir.open(data)
+    grant_others_read(data)
+    monkeypatch.setenv(storage.HOME_ENV, str(data))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("help\n"))
+    assert cli.main([]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""  # the prompt never started
+    assert err == "Error: the data directory has permissions for other users.\n"
+
+
+# --- register (UC1) ------------------------------------------------------------------
+
+PASSWORD = "correct horse battery staple"
+SHOWN_RECOVERY_KEY = re.compile(r"\n    ([A-Z2-7]{4}(?:-[A-Z2-7]{4}){7})\n")
+
+
+def is_taken(accounts: Accounts, username: str) -> bool:
+    try:
+        accounts.check_new_username(username)
+    except AccountError:
+        return True
+    return False
+
+
+def test_register_creates_the_account_and_shows_the_recovery_key_once(
+    run: Run, accounts: Accounts
+) -> None:
+    fake = run("register", "alice", "", secrets=[PASSWORD, PASSWORD])
+    assert "Account created. This is your recovery key:" in fake.text
+    assert len(SHOWN_RECOVERY_KEY.findall(fake.text)) == 1
+    assert "It is shown only now and is not stored anywhere." in fake.text
+    assert is_taken(accounts, "alice")
+
+
+def test_register_reads_passwords_only_at_masked_prompts(run: Run) -> None:
+    fake = run("register", "alice", "", secrets=[PASSWORD, PASSWORD])
+    assert fake.secret_prompts == [
+        "Master password (at least 12 characters): ",
+        "Repeat the master password: ",
+    ]
+    assert "correct horse" not in fake.text
+
+
+def test_register_refuses_two_different_passwords(run: Run, accounts: Accounts) -> None:
+    fake = run("register", "alice", secrets=[PASSWORD, PASSWORD + "!"])
+    assert "Error: the two passwords are different, so nothing was created." in fake.text
+    assert list(accounts.data_dir.path.iterdir()) == []
+
+
+def test_register_refuses_a_weak_password_before_asking_for_it_again(
+    run: Run, accounts: Accounts
+) -> None:
+    fake = run("register", "alice", "register", "alice", secrets=["unbelievable", "too short"])
+    assert "Error: the master password is one of the 10 000 most common passwords." in fake.text
+    assert "Error: the master password must have at least 12 characters." in fake.text
+    assert len(fake.secret_prompts) == 2  # once per attempt, never the repeat prompt
+    assert list(accounts.data_dir.path.iterdir()) == []
+
+
+def test_register_checks_the_username_before_asking_for_a_password(
+    run: Run, accounts: Accounts
+) -> None:
+    accounts.register("alice", PASSWORD)
+    fake = run("register", "alice", "register", "../alice", "register", "Alice")
+    assert "Error: that username is taken." in fake.text
+    assert fake.text.count("Error: a username has 3 to 32 characters") == 2
+    assert fake.secret_prompts == []
+    assert "../alice" not in fake.text
+
+
+def test_register_takes_no_arguments(run: Run) -> None:
+    fake = run("register alice")
+    assert "Error: register takes no arguments." in fake.text
+    assert fake.secret_prompts == []
+
+
+def test_ctrl_c_after_the_recovery_key_is_shown_does_not_cancel_the_account(
+    run: Run, accounts: Accounts
+) -> None:
+    fake = run("register", "alice", KeyboardInterrupt(), secrets=[PASSWORD, PASSWORD])
+    assert "Cancelled." not in fake.text
+    assert is_taken(accounts, "alice")
+
+
+def test_ctrl_c_at_a_password_prompt_cancels_the_registration(run: Run, accounts: Accounts) -> None:
+    fake = run("register", "alice", secrets=[KeyboardInterrupt()])
+    assert "\nCancelled.\n" in fake.text
+    assert not is_taken(accounts, "alice")
