@@ -358,7 +358,7 @@ def test_login_reads_the_saved_counter_and_entries(accounts: Accounts) -> None:
     save_body(accounts, "alice", Body(41, (GITHUB,)))
     session = accounts.login("alice", PASSWORD)
     assert session.counter == 41
-    assert session.summaries() == [("github", "login")]
+    assert [(s.name, s.type) for s in session.summaries()] == [("github", "login")]
 
 
 @pytest.mark.parametrize(

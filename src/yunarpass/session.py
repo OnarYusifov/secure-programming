@@ -73,11 +73,13 @@ class Session:
     def summaries(self) -> list[EntrySummary]:
         """Every entry's name and type, sorted by name without regard to case."""
         self._check_open()
-        return [self._entries[k].summary() for k in sorted(self._entries)]
+        short = self._short_ids()
+        return [self._entries[k].summary(short[self._entries[k].id]) for k in sorted(self._entries)]
 
     def view(self, name: str) -> EntryView:
         """Every field of an entry except the password (T25)."""
-        return self._find(name).view()
+        entry = self._find(name)
+        return entry.view(self._short_ids()[entry.id])
 
     def copy_password(self, name: str, clipboard: ClipboardGuard) -> None:
         """Put an entry's password on the clipboard, which clears it again (T18).
@@ -160,6 +162,9 @@ class Session:
     def _check_open(self) -> None:
         if self.closed:
             raise VaultLockedError
+
+    def _short_ids(self) -> dict[str, str]:
+        return entries.short_ids(entry.id for entry in self._entries.values())
 
     def _find(self, name: str) -> LoginEntry:
         self._check_open()
