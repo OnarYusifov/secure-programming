@@ -1,4 +1,4 @@
-"""Tests for accounts: users.json, registration, login and password change.
+"""Tests for accounts: users.json, registration, login, password change and recovery.
 
 Threats T1, T2, T4, T5, T7, T8, T11, T12.
 """
@@ -680,3 +680,199 @@ def test_the_session_alone_also_needs_the_current_password(alice: Session) -> No
         alice.change_password("a wrong password", NEW_PASSWORD)
     with pytest.raises(PolicyError):
         alice.change_password(PASSWORD, "too short")
+
+
+# --- Recovering with the recovery key (UC8) ------------------------------------------
+
+WRONG_KEY = "A" * 32  # well formed: twenty zero bytes
+
+
+def test_recovery_replaces_the_password_and_the_recovery_key(accounts: Accounts) -> None:
+    old_key = accounts.register("alice", PASSWORD)
+    accounts.login("alice", PASSWORD).add(
+        "github", username="", password="s3cret-Password!", url="", notes=""
+    )
+    session, new_key = accounts.recover("alice", old_key, NEW_PASSWORD)
+    assert session.username == "alice"
+    assert not session.closed
+    assert [summary.name for summary in session.summaries()] == ["github"]
+    assert session.counter == 1  # the body was not saved again
+    assert new_key != old_key
+    assert secrets_gen.format_recovery_key(secrets_gen.parse_recovery_key(new_key)) == new_key
+    # Neither the old password nor the old key opens the vault any more (T5).
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+    with pytest.raises(LoginError):
+        accounts.recover("alice", old_key, "yet another passphrase")
+    assert accounts.login("alice", NEW_PASSWORD).counter == 1
+    accounts.recover("alice", new_key, "yet another passphrase")
+
+
+def test_the_recovery_key_is_read_as_typed(accounts: Accounts) -> None:
+    key = accounts.register("alice", PASSWORD)
+    typed = " " + key.lower().replace("-", " ") + " "
+    session, _ = accounts.recover("alice", typed, NEW_PASSWORD)
+    assert not session.closed
+
+
+def test_a_recovery_rewraps_both_copies_and_leaves_the_rest(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = accounts.register("alice", PASSWORD)
+    before = vault_doc(accounts, "alice")
+    calls: list[object] = []
+    log_kdf_calls(monkeypatch, calls)
+    accounts.recover("alice", key, NEW_PASSWORD)
+    assert calls == ["kdf"]  # Argon2id for the new password only: the key needs just HKDF
+    after = vault_doc(accounts, "alice")
+    assert after["kdf"]["salt"] != before["kdf"]["salt"]
+    for copy in ("password", "recovery"):
+        assert after["wrapped_dek"][copy] != before["wrapped_dek"][copy]
+    assert after["wrapped_dek"]["recovery"]["salt"] != before["wrapped_dek"]["recovery"]["salt"]
+    for doc in (before, after):
+        del doc["kdf"]["salt"], doc["wrapped_dek"]
+    assert after == before  # identity, KDF parameters and body
+
+
+def test_the_new_recovery_key_is_not_stored_anywhere(accounts: Accounts) -> None:
+    old_key = accounts.register("alice", PASSWORD)
+    _, shown = accounts.recover("alice", old_key, NEW_PASSWORD)
+    raw = secrets_gen.parse_recovery_key(shown)
+    forms = [raw, raw.hex().encode(), base64.b64encode(raw), base64.b32encode(raw), shown.encode()]
+    for name, content in contents(accounts).items():
+        for form in forms:
+            assert form not in content, name
+
+
+def test_every_failed_recovery_looks_the_same_and_waits_longer_each_time(
+    accounts: Accounts, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = accounts.register("alice", PASSWORD)
+    bob_key = accounts.register("bob", BOB_PASSWORD)
+    before = contents(accounts)
+    opened: list[object] = []
+    monkeypatch.setattr(vaultfile, "open_body", lambda *args: opened.append(args))
+    attempts = [
+        ("alice", bob_key),  # another user's key
+        ("alice", WRONG_KEY),
+        ("alice", "not a recovery key"),  # malformed
+        ("alice", key + "A"),
+        ("alice", "x" * 1000),
+        ("bob", key),
+        ("carol", key),  # unknown user
+        ("../alice", key),
+    ]
+    for username, typed in attempts:
+        with pytest.raises(LoginError) as caught:
+            accounts.recover(username, typed, NEW_PASSWORD)
+        assert type(caught.value) is LoginError
+        assert str(caught.value) == "login failed"
+    assert clock.log == [1, 2, 4, 8, 16, 32, 32, 32]
+    assert opened == []  # nothing from a vault was decrypted
+    assert contents(accounts) == before
+
+
+def test_recovery_and_login_share_the_delay(accounts: Accounts, clock: FakeClock) -> None:
+    key = accounts.register("alice", PASSWORD)
+    with pytest.raises(LoginError):
+        accounts.recover("alice", WRONG_KEY, NEW_PASSWORD)
+    with pytest.raises(LoginError):
+        accounts.login("alice", "a wrong password")
+    accounts.recover("alice", key, NEW_PASSWORD)  # a success resets it
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+    assert clock.log == [1, 2, 1]
+
+
+@pytest.mark.parametrize("new", ["too short", "unbelievable", "x" * 1025])
+def test_a_recovery_checks_the_new_password_before_the_key(
+    accounts: Accounts, clock: FakeClock, monkeypatch: pytest.MonkeyPatch, new: str
+) -> None:
+    key = accounts.register("alice", PASSWORD)
+    before = contents(accounts)
+    tried: list[object] = []
+    monkeypatch.setattr(vaultfile, "unlock_with_recovery_key", lambda *args: tried.append(args))
+    with pytest.raises(PolicyError):
+        accounts.recover("alice", key, new)
+    assert tried == []
+    assert clock.log == []  # a policy error costs no delay
+    assert contents(accounts) == before
+
+
+def change_the_recovery_salt(doc: dict[str, Any]) -> None:
+    doc["wrapped_dek"]["recovery"]["salt"] = base64.b64encode(bytes(16)).decode()
+
+
+@pytest.mark.parametrize(
+    "change", [flip_a_body_byte, change_the_recovery_salt, rename_to_bob, drop_a_field]
+)
+def test_a_tampered_vault_fails_recovery_like_a_wrong_key(
+    accounts: Accounts, change: Callable[[dict[str, Any]], None]
+) -> None:
+    key = accounts.register("alice", PASSWORD)
+    rewrite_vault(accounts, "alice", change)
+    before = contents(accounts)
+    with pytest.raises(LoginError, match="login failed"):
+        accounts.recover("alice", key, NEW_PASSWORD)
+    assert contents(accounts) == before
+
+
+def test_a_body_that_does_not_open_fails_recovery_and_its_dek_is_wiped(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = accounts.register("alice", PASSWORD)
+    rewrite_vault(accounts, "alice", flip_a_body_byte)
+    deks: list[bytearray] = []
+    unlock = vaultfile.unlock_with_recovery_key
+
+    def keep_dek(vault: VaultFile, recovery_key: bytes) -> bytearray:
+        deks.append(unlock(vault, recovery_key))
+        return deks[-1]
+
+    monkeypatch.setattr(vaultfile, "unlock_with_recovery_key", keep_dek)
+    with pytest.raises(LoginError):
+        accounts.recover("alice", key, NEW_PASSWORD)
+    assert deks == [bytearray(crypto.KEY_BYTES)]
+
+
+def test_a_recovery_is_refused_if_another_session_saved_meanwhile(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = accounts.register("alice", PASSWORD)
+    other = accounts.login("alice", PASSWORD)
+    rewrap = vaultfile.rewrap_recovery
+
+    def save_first(vault: VaultFile, dek: crypto.Key, recovery_key: bytes) -> VaultFile:
+        if not other.summaries():  # only once
+            other.add("github", username="", password="s3cret-Password!", url="", notes="")
+        return rewrap(vault, dek, recovery_key)
+
+    monkeypatch.setattr(vaultfile, "rewrap_recovery", save_first)
+    closed: list[Session] = []
+    close = Session.close
+
+    def logged_close(self: Session) -> None:
+        closed.append(self)
+        close(self)
+
+    monkeypatch.setattr(Session, "close", logged_close)
+    with pytest.raises(VaultChangedError):
+        accounts.recover("alice", key, NEW_PASSWORD)
+    assert len(closed) == 1  # the session is not handed out
+    # Nothing changed: the other session's save stands, and the old secrets still work.
+    assert accounts.login("alice", PASSWORD).counter == 1
+    accounts.recover("alice", key, NEW_PASSWORD)
+
+
+def test_the_session_alone_also_needs_the_recovery_key(accounts: Accounts) -> None:
+    key = secrets_gen.parse_recovery_key(accounts.register("alice", PASSWORD))
+    session = accounts.login("alice", PASSWORD)
+    before = contents(accounts)
+    with pytest.raises(CryptoError):
+        session.recover(bytes(crypto.RECOVERY_KEY_BYTES), NEW_PASSWORD)
+    with pytest.raises(PolicyError):
+        session.recover(key, "too short")
+    assert contents(accounts) == before
+    session.close()
+    with pytest.raises(VaultLockedError):
+        session.recover(key, NEW_PASSWORD)

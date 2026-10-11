@@ -1,4 +1,4 @@
-"""User management: the accounts in a data directory (UC1, UC2, UC7).
+"""User management: the accounts in a data directory (UC1, UC2, UC7, UC8).
 
 users.json is the index of accounts, username to vault ID, and holds no
 secrets. It is parsed as strictly as a vault file (DESIGN.md §4):
@@ -183,12 +183,7 @@ class Accounts:
             dek = vaultfile.unlock_with_password(vault, password)
         except CryptoError:
             self._fail()
-        try:
-            # The session checks every entry, as strictly as the file (T19).
-            session = Session(vault, dek, vaultfile.open_body(vault, dek), self.data_dir)
-        except (CryptoError, VaultFormatError):
-            crypto.wipe(dek)
-            self._fail()
+        session = self._open(vault, dek)
         self.backoff.succeeded()
         return session
 
@@ -210,6 +205,52 @@ class Accounts:
             self._delay()
             raise WrongPasswordError from None
         self.backoff.succeeded()
+
+    def recover(self, username: str, recovery_key: str, new_password: str) -> tuple[Session, str]:
+        """Unlock the user's vault with the recovery key, and replace both secrets (UC8).
+
+        The new master password must meet the policy (PolicyError), which is
+        checked first and costs no delay. The recovery key is taken as the
+        user typed it. An unknown username, a malformed or wrong key and a
+        damaged or swapped vault all raise the same LoginError, after the same
+        growing delay as a failed login, from the same Backoff (T2, T4).
+
+        On success the vault gets a new password copy of the DEK and a new
+        recovery key, and is saved, so the old password and the old key no
+        longer open it (T5). Returns the unlocked session and the new
+        recovery key, formatted for writing down. If the save fails, the
+        session is closed and nothing has changed.
+        """
+        policy.check_master_password(new_password)
+        self.backoff.wait()
+        vault = self._find_vault(username)
+        try:
+            key = secrets_gen.parse_recovery_key(recovery_key)
+        except ValueError:
+            self._fail()
+        if vault is None:
+            self._fail()
+        try:
+            dek = vaultfile.unlock_with_recovery_key(vault, key)
+        except CryptoError:
+            self._fail()
+        session = self._open(vault, dek)
+        self.backoff.succeeded()
+        try:
+            new_key = session.recover(key, new_password)
+        except BaseException:
+            session.close()
+            raise
+        return session, new_key
+
+    def _open(self, vault: VaultFile, dek: bytearray) -> Session:
+        """A session on the unlocked vault. Raises LoginError if its body does not open."""
+        try:
+            # The session checks every entry, as strictly as the file (T19).
+            return Session(vault, dek, vaultfile.open_body(vault, dek), self.data_dir)
+        except (CryptoError, VaultFormatError):
+            crypto.wipe(dek)
+            self._fail()
 
     def _find_vault(self, username: str) -> VaultFile | None:
         """The user's vault, or None if there is no usable one."""
