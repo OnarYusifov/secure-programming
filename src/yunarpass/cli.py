@@ -28,12 +28,14 @@ from typing import NamedTuple
 
 from yunarpass import __version__, policy
 from yunarpass.policy import PolicyError
+from yunarpass.session import Session
 from yunarpass.storage import DataDir, StorageError
-from yunarpass.users import AccountError, Accounts
+from yunarpass.users import AccountError, Accounts, LoginError
 
 MAX_LINE = 256  # characters in one command line
 
 PROMPT = "yunarpass> "
+LOGIN_FAILED = "Login failed."
 GENERIC_ERROR = "Something went wrong and the command did not complete."
 UNKNOWN_COMMAND = "Unknown command. Type help to see the commands."
 
@@ -104,18 +106,27 @@ class Repl:
     def __init__(self, accounts: Accounts, console: Console | None = None) -> None:
         self.accounts = accounts
         self.console = Console() if console is None else console
+        self.session: Session | None = None
         self.running = False
 
     @property
     def prompt(self) -> str:
-        return PROMPT
+        if self.session is None:
+            return PROMPT
+        return f"yunarpass:{self.session.username}> "
 
     def commands(self) -> dict[str, Command]:
         """The allow-list: the commands of the current state."""
+        if self.session is None:
+            return {
+                "register": Command(self.register, "Create an account and its vault"),
+                "login": Command(self.login, "Unlock your vault"),
+                "help": Command(self.help, "Show this list"),
+                "quit": Command(self.quit, "Exit"),
+            }
         return {
-            "register": Command(self.register, "Create an account and its vault"),
             "help": Command(self.help, "Show this list"),
-            "quit": Command(self.quit, "Exit"),
+            "quit": Command(self.quit, "Lock the vault and exit"),
         }
 
     def say(self, *lines: str) -> None:
@@ -126,14 +137,24 @@ class Repl:
         """Read and run commands until quit, Ctrl-C or the end of input."""
         self.running = True
         self.say(f"yunarpass {__version__}. Type help to see the commands.")
-        while self.running:
-            try:
-                line = self.console.read_line(sanitize(self.prompt))
-            except (EOFError, KeyboardInterrupt):
-                self.say("")  # end the prompt's line
-                break
-            self.execute(line)
+        try:
+            while self.running:
+                try:
+                    line = self.console.read_line(sanitize(self.prompt))
+                except (EOFError, KeyboardInterrupt):
+                    self.say("")  # end the prompt's line
+                    break
+                self.execute(line)
+        finally:
+            self.lock()  # however the loop ends, the DEK is wiped
         return 0
+
+    def lock(self) -> None:
+        """Close the session, if there is one: the DEK is wiped (T13)."""
+        if self.session is not None:
+            self.session.close()
+            self.session = None
+            self.say("Vault locked.")
 
     def execute(self, line: str) -> None:
         """Run one command line. Errors are reported here and never raised."""
@@ -185,6 +206,24 @@ class Repl:
         # Pressing Ctrl-C here must not report the account as cancelled.
         with contextlib.suppress(EOFError, KeyboardInterrupt):
             self.console.read_line("Press Enter once you have written it down.")
+        self.say("", "Log in with: login")
+
+    def login(self, args: str) -> None:
+        _no_arguments("login", args)
+        username = self.console.read_line("Username: ").strip()
+        password = self.console.read_secret("Master password: ")
+        try:
+            self.session = self.accounts.login(username, password)
+        except LoginError:
+            # One message for an unknown user, a wrong password and a damaged
+            # vault (T4).
+            self.say(LOGIN_FAILED)
+            return
+        finally:
+            del password
+        saved = self.session.counter
+        # The counter lets the user notice an older copy put back in place (T9).
+        self.say(f"Vault unlocked. Saved {saved} {'time' if saved == 1 else 'times'}.")
 
     def help(self, args: str) -> None:
         _no_arguments("help", args)

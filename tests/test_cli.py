@@ -10,10 +10,12 @@ from typing import Protocol
 
 import pytest
 
-from yunarpass import __version__, cli, storage
+from yunarpass import __version__, cli, storage, vaultfile
 from yunarpass.cli import Console, Repl
+from yunarpass.session import Session
 from yunarpass.storage import DataDir, StorageError
-from yunarpass.users import AccountError, Accounts
+from yunarpass.users import AccountError, Accounts, Backoff
+from yunarpass.vaultfile import Body
 
 type Typed = str | BaseException
 
@@ -62,9 +64,13 @@ class Run(Protocol):
     def __call__(self, *lines: Typed, secrets: Iterable[Typed] = ()) -> FakeConsole: ...
 
 
+def no_sleep(seconds: float) -> None:
+    pass  # the login delay itself is tested in test_users.py
+
+
 @pytest.fixture
 def accounts(tmp_path: Path) -> Accounts:
-    return Accounts(DataDir.open(tmp_path / "data"))
+    return Accounts(DataDir.open(tmp_path / "data"), Backoff(sleep=no_sleep))
 
 
 @pytest.fixture
@@ -93,6 +99,7 @@ def test_help_lists_the_commands(run: Run) -> None:
     assert fake.text.endswith(
         "Commands:\n"
         "  register  Create an account and its vault\n"
+        "  login     Unlock your vault\n"
         "  help      Show this list\n"
         "  quit      Exit\n" + cli.PROMPT + "\n"
     )
@@ -381,3 +388,86 @@ def test_ctrl_c_at_a_password_prompt_cancels_the_registration(run: Run, accounts
     fake = run("register", "alice", secrets=[KeyboardInterrupt()])
     assert "\nCancelled.\n" in fake.text
     assert not is_taken(accounts, "alice")
+
+
+def test_register_then_login_end_to_end(run: Run) -> None:
+    fake = run("register", "alice", "", "login", "alice", secrets=[PASSWORD] * 3)
+    assert "\nLog in with: login\n" in fake.text
+    assert "Vault unlocked. Saved 0 times.\n" in fake.text
+    assert "correct horse" not in fake.text
+
+
+# --- login (UC2) ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def alice(accounts: Accounts) -> None:
+    accounts.register("alice", PASSWORD)
+
+
+@pytest.mark.usefixtures("alice")
+def test_login_unlocks_the_vault_and_shows_the_counter(run: Run) -> None:
+    fake = run("login", "alice", secrets=[PASSWORD])
+    assert fake.secret_prompts == ["Master password: "]
+    assert "Vault unlocked. Saved 0 times.\n" in fake.text
+    # The prompt names the user; at the end of the input the vault is locked.
+    assert fake.text.endswith("Saved 0 times.\nyunarpass:alice> \nVault locked.\n")
+
+
+def test_one_save_is_singular(
+    run: Run, accounts: Accounts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, dek = vaultfile.create("alice", PASSWORD, bytes(20), Body(1, ()))
+    monkeypatch.setattr(accounts, "login", lambda *args: Session(vault, dek, Body(1, ())))
+    fake = run("login", "alice", secrets=[PASSWORD])
+    assert "Vault unlocked. Saved 1 time.\n" in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_a_failed_login_looks_the_same_for_a_wrong_password_and_an_unknown_user(
+    run: Run,
+) -> None:
+    wrong_password = run("login", "alice", secrets=["a wrong password"])
+    unknown_user = run("login", "bob", secrets=[PASSWORD])
+    assert wrong_password.text == unknown_user.text
+    assert f"Master password: {cli.LOGIN_FAILED}\n{cli.PROMPT}" in wrong_password.text
+    assert "unlocked" not in wrong_password.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_login_takes_no_arguments(run: Run) -> None:
+    fake = run("login alice correct-horse-battery-staple")
+    assert "Error: login takes no arguments." in fake.text
+    assert "correct-horse" not in fake.text
+    assert fake.secret_prompts == []
+
+
+@pytest.mark.usefixtures("alice")
+def test_unlocked_the_prompt_offers_only_the_unlocked_commands(run: Run) -> None:
+    fake = run("login", "alice", "help", "register", "login", secrets=[PASSWORD])
+    assert ("Commands:\n  help  Show this list\n  quit  Lock the vault and exit\n") in fake.text
+    assert fake.text.count(cli.UNKNOWN_COMMAND) == 2
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize("leave", ["quit", KeyboardInterrupt(), None])
+def test_leaving_the_prompt_locks_the_vault(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch, leave: Typed | None
+) -> None:
+    closed: list[Session] = []
+    close = Session.close
+
+    def logged_close(self: Session) -> None:
+        closed.append(self)
+        close(self)
+
+    monkeypatch.setattr(Session, "close", logged_close)
+    lines: list[Typed] = ["login", "alice"]
+    if leave is not None:  # None: the input simply ends
+        lines.append(leave)
+    fake = FakeConsole(lines, [PASSWORD])
+    repl = Repl(accounts, fake.console())
+    assert repl.run() == 0
+    assert repl.session is None
+    assert len(closed) == 1
+    assert fake.text.endswith("Vault locked.\n")
