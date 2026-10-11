@@ -69,6 +69,15 @@ yunarpass prints how many times the vault has been saved. If that number is lowe
 remember, an older copy of the vault file was put back in place. `quit`, Ctrl-C at the prompt and
 the end of input lock the vault, which wipes its key from memory.
 
+`recover` is the way back in after a forgotten master password. It asks for the username, the
+recovery key, and a new master password twice; the key is typed at a masked prompt, in upper or
+lower case, with or without the dashes. The new password follows the same rules as at
+registration. If the key is right, the vault gets the new master password and a new recovery key,
+which is printed once, as at registration, and the vault is unlocked. From then on the old key and
+the old password no longer open the vault: a key that has been used may have been seen. A wrong or
+mistyped key and an unknown username all give the same `Recovery failed.`, with the same growing
+wait as a failed login.
+
 After unlocking (`yunarpass:<username>>` prompt):
 
 | Command | Action |
