@@ -33,6 +33,11 @@ def test_allowed_names(name: str) -> None:
     [
         "",
         "x" * 65,
+        "-",  # what edit takes for "clear this field"
+        "-rf",
+        ".hidden",
+        "..",
+        "@work",
         "two words",
         "../github",
         "a/b",
