@@ -29,7 +29,7 @@ from typing import NamedTuple
 
 from yunarpass import __version__, entries, policy, secrets_gen
 from yunarpass.clipboard import ClipboardError, ClipboardGuard, system_clipboard
-from yunarpass.entries import MASK, EntryError, EntryView
+from yunarpass.entries import MASK, EntryError, EntrySummary, EntryView
 from yunarpass.policy import PolicyError
 from yunarpass.session import Session, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
@@ -77,6 +77,8 @@ _SAFE_ERRORS = (
 
 # Typed at an entry's password prompt, it fills in a generated password.
 GENERATE = "gen"
+# How an entry command names its entry: a name, or the start of an ID.
+_REF = "<name or ID>"
 
 
 class Command(NamedTuple):
@@ -118,10 +120,10 @@ class Repl:
         return {
             "add": Command(self.add, "Add a login entry", "<name>"),
             "list": Command(self.list_entries, "List the entries"),
-            "show": Command(self.show, "Show an entry; the password stays masked", "<name>"),
-            "copy": Command(self.copy, "Copy an entry's password to the clipboard", "<name>"),
-            "edit": Command(self.edit, "Change an entry", "<name>"),
-            "rm": Command(self.rm, "Delete an entry", "<name>"),
+            "show": Command(self.show, "Show an entry; the password stays masked", _REF),
+            "copy": Command(self.copy, "Copy an entry's password to the clipboard", _REF),
+            "edit": Command(self.edit, "Change an entry", _REF),
+            "rm": Command(self.rm, "Delete an entry", _REF),
             "gen": Command(self.gen, "Copy a new random password to the clipboard", "[length]"),
             "passwd": Command(self.passwd, "Change the master password"),
             "help": Command(self.help, "Show this list"),
@@ -246,8 +248,8 @@ class Repl:
         password = self._entry_password(typed)
         url = entries.check_url(self.ask("URL: "))
         notes = entries.check_notes(self.ask("Notes: "))
-        session.add(name, username=username, password=password, url=url, notes=notes)
-        self.say(f"Added {name}.")
+        added = session.add(name, username=username, password=password, url=url, notes=notes)
+        self.say(f"Added {name} ({added.short_id}).")
 
     def _entry_password(self, typed: str) -> str:
         """A generated password for "gen"; otherwise the typed one, checked and typed again."""
@@ -262,15 +264,40 @@ class Repl:
             raise UsageError("the two passwords are different, so nothing was saved")
         return password
 
-    def _only(self, command: str, args: str) -> EntryView:
-        """The one entry named in the arguments."""
+    def _pick(self, command: str, args: str, *, change: bool) -> EntryView | None:
+        """The entry the user means by a name or an ID, or None if none was chosen (T29).
+
+        If several entries match, a command that changes or deletes one stops
+        and shows their IDs; one that only reads asks which one is meant.
+        """
         session = self._unlocked()
-        matches = session.find(_entry_name(command, args))
+        ref = _entry_ref(command, args)
+        matches = session.find(ref)
         if not matches:
-            raise EntryError("there is no entry with that name")
-        if len(matches) > 1:
-            raise UsageError("several entries have that name")
-        return session.view(matches[0].id)
+            raise EntryError("there is no entry with that name or ID")
+        if len(matches) == 1:
+            return session.view(matches[0].id)
+        if all(entries.key(match.name) == entries.key(ref) for match in matches):
+            heading = f"{len(matches)} entries are named {ref}:"
+        else:
+            heading = f"{len(matches)} entries have an ID that starts with {ref.lower()}:"
+        rows = _rows(matches)
+        if change:
+            self.say(
+                heading,
+                *(f"  {row}" for row in rows),
+                "To change or delete one of them, use its ID, "
+                f"for example: {command} {matches[0].short_id}",
+            )
+            return None
+        self.say(heading, *(f"  {number}) {row}" for number, row in enumerate(rows, 1)))
+        answer = self.ask(f"Which one (1-{len(matches)}, Enter cancels)? ")
+        if not answer:
+            self.say("Cancelled.")
+            return None
+        if not _NUMBER.fullmatch(answer) or not 1 <= int(answer) <= len(matches):
+            raise UsageError(f"type a number from 1 to {len(matches)}")
+        return session.view(matches[int(answer) - 1].id)
 
     def list_entries(self, args: str) -> None:
         _no_arguments("list", args)
@@ -278,35 +305,41 @@ class Repl:
         if not summaries:
             self.say("The vault is empty. Add an entry with: add <name>")
             return
-        width = max(len(summary.name) for summary in summaries)
         count = len(summaries)
         self.say(
             f"{count} {'entry' if count == 1 else 'entries'}:",
-            *(f"  {summary.name:<{width}}  {summary.type}" for summary in summaries),
+            *(f"  {row}" for row in _rows(summaries)),
         )
 
     def show(self, args: str) -> None:
-        view = self._only("show", args)
+        view = self._pick("show", args, change=False)
+        if view is None:
+            return
         notes = view.notes.split("\n")
-        rows = [
-            ("Name", view.name),
-            ("Type", view.type),
-            ("Username", view.username),
-            ("Password", MASK),  # always the mask: the view has no password (T25)
-            ("URL", view.url),
-            ("Created", _time(view.created)),
-            ("Modified", _time(view.modified)),
-            ("Notes", notes[0]),
-        ]
         self.say(
-            *(f"  {label + ':':<10}{value}".rstrip() for label, value in rows),
+            *_fields(
+                ("ID", view.short_id),
+                ("Name", view.name),
+                ("Type", view.type),
+                ("Username", view.username),
+                ("Password", MASK),  # always the mask: the view has no password (T25)
+                ("URL", view.url),
+                ("Created", _time(view.created)),
+                ("Modified", _time(view.modified)),
+                ("Notes", notes[0]),
+            ),
             *(f"  {'':<10}{line}".rstrip() for line in notes[1:]),
         )
 
     def edit(self, args: str) -> None:
         session = self._unlocked()
-        view = self._only("edit", args)
-        self.say(f"Editing {view.name}. Press Enter to keep a value, or type - to clear it.")
+        view = self._pick("edit", args, change=True)
+        if view is None:
+            return
+        self.say(
+            f"Editing {view.name} ({view.short_id}). "
+            "Press Enter to keep a value, or type - to clear it."
+        )
         new_name: str | None = self.ask(f"Name [{view.name}]: ")
         if not new_name or new_name == view.name:
             new_name = None
@@ -330,7 +363,7 @@ class Repl:
             url=url,
             notes=notes,
         )
-        self.say(f"Saved the changes to {new_name or view.name}.")
+        self.say(f"Saved the changes to {new_name or view.name} ({view.short_id}).")
 
     def _changed(self, label: str, current: str, check: Callable[[str], str]) -> str | None:
         """Ask for a new value: None keeps the current one, and - clears it."""
@@ -342,20 +375,32 @@ class Repl:
 
     def rm(self, args: str) -> None:
         session = self._unlocked()
-        view = self._only("rm", args)
-        if self.ask(f"Type {view.name} again to delete it: ") != view.name:
-            self.say("The names are different, so nothing was deleted.")
+        view = self._pick("rm", args, change=True)
+        if view is None:
+            return
+        # The entry itself, so the user sees which one they are about to lose.
+        self.say(
+            *_fields(
+                ("ID", view.short_id),
+                ("Name", view.name),
+                ("Username", view.username),
+                ("URL", view.url),
+            )
+        )
+        if self.ask("Type yes to delete this entry: ").lower() != "yes":
+            self.say("Nothing was deleted.")
             return
         session.remove(view.id)
-        self.say(f"Deleted {view.name}.")
+        self.say(f"Deleted {view.name} ({view.short_id}).")
 
     def copy(self, args: str) -> None:
         session = self._unlocked()
-        view = self._only("copy", args)
-        name = view.name
+        view = self._pick("copy", args, change=False)
+        if view is None:
+            return
         session.copy_password(view.id, self.clipboard)
         self.say(
-            f"Copied the password of {name}. "
+            f"Copied the password of {view.name} ({view.short_id}). "
             f"The clipboard is cleared in {self.clipboard.seconds:g} seconds."
         )
 
@@ -406,20 +451,45 @@ def _no_arguments(name: str, args: str) -> None:
 
 
 def _entry_name(command: str, args: str) -> str:
-    """The one argument of an entry command. An invalid name is not printed back."""
+    """The name argument of add. An invalid name is not printed back."""
     if not args:
-        raise UsageError(f"{command} needs the name of an entry: {command} <name>")
+        raise UsageError(f"{command} needs the name of the new entry: {command} <name>")
     return entries.check_name(args)
 
 
-_LENGTH = re.compile(r"[0-9]{1,3}")
+def _entry_ref(command: str, args: str) -> str:
+    """A name or an ID, the argument of an entry command. An invalid one is not printed back."""
+    if not args:
+        raise UsageError(f"{command} needs an entry's name or ID: {command} {_REF}")
+    return entries.check_name(args)  # an ID is letters and digits, so it passes too
+
+
+def _rows(summaries: list[EntrySummary]) -> list[str]:
+    """One aligned line per entry: short ID, name, type and username."""
+    id_width = max(len(s.short_id) for s in summaries)
+    name_width = max(len(s.name) for s in summaries)
+    type_width = max(len(s.type) for s in summaries)
+    return [
+        f"{s.short_id:<{id_width}}  {s.name:<{name_width}}  {s.type:<{type_width}}  "
+        f"{_brief(s.username)}".rstrip()
+        for s in summaries
+    ]
+
+
+def _fields(*rows: tuple[str, str]) -> list[str]:
+    """Label and value pairs as aligned lines."""
+    return [f"  {label + ':':<10}{value}".rstrip() for label, value in rows]
+
+
+# Only ASCII digits: str.isdigit() would also accept "²" or "٣".
+_NUMBER = re.compile(r"[0-9]{1,3}")
 
 
 def _password_length(args: str) -> int:
     """The optional argument of gen. A refused argument is not printed back."""
     if not args:
         return secrets_gen.DEFAULT_LENGTH
-    if _LENGTH.fullmatch(args) and (secrets_gen.MIN_LENGTH <= int(args) <= secrets_gen.MAX_LENGTH):
+    if _NUMBER.fullmatch(args) and (secrets_gen.MIN_LENGTH <= int(args) <= secrets_gen.MAX_LENGTH):
         return int(args)
     raise UsageError(
         f"gen takes a length from {secrets_gen.MIN_LENGTH} to {secrets_gen.MAX_LENGTH}: "

@@ -1,4 +1,4 @@
-"""Tests for the REPL (threats T3, T16, T17, T18, T19, T20, T25, T28)."""
+"""Tests for the REPL (threats T3, T16, T17, T18, T19, T20, T25, T28, T29)."""
 
 import getpass
 import io
@@ -6,6 +6,7 @@ import re
 import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Protocol
 
 import pytest
@@ -478,16 +479,16 @@ def test_unlocked_the_prompt_offers_only_the_unlocked_commands(run: Run) -> None
     fake = run("login", "alice", "help", "register", "login", secrets=[PASSWORD])
     assert (
         "Commands:\n"
-        "  add <name>    Add a login entry\n"
-        "  list          List the entries\n"
-        "  show <name>   Show an entry; the password stays masked\n"
-        "  copy <name>   Copy an entry's password to the clipboard\n"
-        "  edit <name>   Change an entry\n"
-        "  rm <name>     Delete an entry\n"
-        "  gen [length]  Copy a new random password to the clipboard\n"
-        "  passwd        Change the master password\n"
-        "  help          Show this list\n"
-        "  quit          Lock the vault and exit\n"
+        "  add <name>         Add a login entry\n"
+        "  list               List the entries\n"
+        "  show <name or ID>  Show an entry; the password stays masked\n"
+        "  copy <name or ID>  Copy an entry's password to the clipboard\n"
+        "  edit <name or ID>  Change an entry\n"
+        "  rm <name or ID>    Delete an entry\n"
+        "  gen [length]       Copy a new random password to the clipboard\n"
+        "  passwd             Change the master password\n"
+        "  help               Show this list\n"
+        "  quit               Lock the vault and exit\n"
     ) in fake.text
     assert fake.text.count(cli.UNKNOWN_COMMAND) == 2
 
@@ -520,6 +521,12 @@ def test_leaving_the_prompt_locks_the_vault(
 
 SECRET = "s3cret-Password!"
 ADD_GITHUB = ("add github", "alice@example.com", "https://github.com", "personal")
+SHORT_ID = "[0-9a-f]{6}"
+
+
+def short_ids(accounts: Accounts, name: str) -> list[str]:
+    """The short IDs of alice's entries with this name, oldest first."""
+    return [summary.short_id for summary in accounts.login("alice", PASSWORD).find(name)]
 
 
 def stored_password(accounts: Accounts, name: str) -> str:
@@ -542,9 +549,10 @@ def test_add_then_list_and_show(run: Run) -> None:
         "Password (or gen to generate one): ",
         "Repeat the password: ",
     ]
-    assert "Added github.\n" in fake.text
-    assert "1 entry:\n  github  login\n" in fake.text
+    assert re.search(rf"Added github \(({SHORT_ID})\)\.\n", fake.text)
+    assert re.search(rf"1 entry:\n  {SHORT_ID}  github  login  alice@example\.com\n", fake.text)
     assert re.search(
+        rf"  ID:       {SHORT_ID}\n"
         r"  Name:     github\n"
         r"  Type:     login\n"
         r"  Username: alice@example\.com\n"
@@ -573,7 +581,7 @@ def test_no_password_is_ever_printed(run: Run) -> None:
         "show github",
         secrets=[SECRET, SECRET, new, new],
     )
-    assert "Saved the changes to github.\n" in fake.text
+    assert re.search(rf"Saved the changes to github \({SHORT_ID}\)\.\n", fake.text)
     assert fake.text.count("  Password: ********\n") == 2
     for secret in (SECRET, new, PASSWORD):
         assert secret not in fake.text
@@ -584,7 +592,7 @@ def test_entries_persist_after_quit(run: Run) -> None:
     unlocked(run, *ADD_GITHUB, "quit", secrets=[SECRET, SECRET])
     fake = unlocked(run, "list")
     assert "Vault unlocked. Saved 1 time.\n" in fake.text
-    assert "  github  login\n" in fake.text
+    assert re.search(rf"  {SHORT_ID}  github  login  alice@example\.com\n", fake.text)
 
 
 @pytest.mark.usefixtures("alice")
@@ -601,10 +609,17 @@ def test_list_takes_no_arguments(run: Run) -> None:
 
 
 @pytest.mark.usefixtures("alice")
-@pytest.mark.parametrize("command", ["add", "show", "edit", "rm"])
-def test_an_entry_command_needs_a_name(run: Run, command: str) -> None:
+@pytest.mark.parametrize("command", ["show", "copy", "edit", "rm"])
+def test_an_entry_command_needs_a_name_or_an_id(run: Run, command: str) -> None:
     fake = unlocked(run, command)
-    assert f"Error: {command} needs the name of an entry: {command} <name>.\n" in fake.text
+    expected = f"Error: {command} needs an entry's name or ID: {command} <name or ID>.\n"
+    assert expected in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_add_needs_a_name(run: Run) -> None:
+    fake = unlocked(run, "add")
+    assert "Error: add needs the name of the new entry: add <name>.\n" in fake.text
 
 
 @pytest.mark.usefixtures("alice")
@@ -620,10 +635,12 @@ def test_a_name_off_the_allow_list_is_refused_and_not_echoed(
 
 
 @pytest.mark.usefixtures("alice")
-@pytest.mark.parametrize("command", ["show github", "edit github", "rm github"])
+@pytest.mark.parametrize(
+    "command", ["show github", "copy github", "edit github", "rm github", "rm 3f9c0d"]
+)
 def test_an_unknown_entry_is_refused(run: Run, command: str) -> None:
     fake = unlocked(run, command)
-    assert "Error: there is no entry with that name.\n" in fake.text
+    assert "Error: there is no entry with that name or ID.\n" in fake.text
 
 
 @pytest.mark.usefixtures("alice")
@@ -679,11 +696,11 @@ def test_edit_keeps_on_enter_clears_on_a_dash_and_renames(run: Run) -> None:
     assert fake.secret_prompts[-1] == (
         "Password (Enter keeps the current one, gen generates a new one): "
     )
-    assert "Saved the changes to code.\n" in fake.text
+    assert re.search(rf"Saved the changes to code \({SHORT_ID}\)\.\n", fake.text)
     assert "  Username:\n" in fake.text
     assert "  URL:      https://example.com\n" in fake.text
     assert "  Notes:    personal\n" in fake.text
-    assert "1 entry:\n  code  login\n" in fake.text
+    assert re.search(rf"1 entry:\n  {SHORT_ID}  code  login\n", fake.text)
 
 
 @pytest.mark.usefixtures("alice")
@@ -708,22 +725,22 @@ def test_edit_cannot_clear_the_name(run: Run) -> None:
 
 
 @pytest.mark.usefixtures("alice")
-def test_rm_needs_the_name_typed_again(run: Run) -> None:
-    fake = unlocked(
-        run,
-        *ADD_GITHUB,
-        "rm github",
-        "gihtub",
-        "list",
-        "rm GITHUB",
-        "github",
-        "list",
-        secrets=[SECRET, SECRET],
+def test_rm_shows_the_entry_and_needs_yes(run: Run, accounts: Accounts) -> None:
+    unlocked(run, *ADD_GITHUB, secrets=[SECRET, SECRET])
+    (short,) = short_ids(accounts, "github")
+    fake = unlocked(run, "rm github", "no", "rm github", "", "rm GITHUB", "Yes", "list")
+    assert (
+        fake.text.count(
+            f"  ID:       {short}\n"
+            "  Name:     github\n"
+            "  Username: alice@example.com\n"
+            "  URL:      https://github.com\n"
+            "Type yes to delete this entry: "
+        )
+        == 3
     )
-    assert fake.text.count("Type github again to delete it: ") == 2
-    assert "The names are different, so nothing was deleted.\n" in fake.text
-    assert "1 entry:\n  github  login\n" in fake.text
-    assert "Deleted github.\n" in fake.text
+    assert fake.text.count("Nothing was deleted.\n") == 2
+    assert f"Deleted github ({short}).\n" in fake.text
     assert fake.text.rstrip().endswith(
         "The vault is empty. Add an entry with: add <name>\nyunarpass:alice> \nVault locked."
     )
@@ -754,7 +771,7 @@ def test_two_prompts_do_not_overwrite_each_others_entries(accounts: Accounts) ->
     second.execute("login")
     first.execute("add github")
     second.execute("add mail")
-    assert "Added github.\n" in one.text
+    assert re.search(rf"Added github \({SHORT_ID}\)\.\n", one.text)
     assert (
         "Error: the vault file was changed by another session since you logged in, "
         "so this change was not saved; log in again to continue.\n"
@@ -767,8 +784,8 @@ def test_edit_can_change_only_the_case_of_the_name(run: Run) -> None:
     fake = unlocked(
         run, *ADD_GITHUB, "edit github", "GitHub", "", "", "", "list", secrets=[SECRET, SECRET, ""]
     )
-    assert "Saved the changes to GitHub.\n" in fake.text
-    assert "  GitHub  login\n" in fake.text
+    assert re.search(rf"Saved the changes to GitHub \({SHORT_ID}\)\.\n", fake.text)
+    assert re.search(rf"  {SHORT_ID}  GitHub  login", fake.text)
 
 
 def test_entry_commands_need_an_unlocked_vault(accounts: Accounts) -> None:
@@ -789,7 +806,11 @@ def test_copy_puts_the_password_on_the_clipboard_and_never_prints_it(
     fake = unlocked(run, *ADD_GITHUB, "copy GitHub", secrets=[SECRET, SECRET])
     assert clipboard.backend.written == [SECRET]
     assert [seconds for seconds, _ in clipboard.timers] == [20]
-    assert "Copied the password of github. The clipboard is cleared in 20 seconds.\n" in fake.text
+    assert re.search(
+        rf"Copied the password of github \({SHORT_ID}\)\. "
+        r"The clipboard is cleared in 20 seconds\.\n",
+        fake.text,
+    )
     assert SECRET not in fake.text
 
 
@@ -817,7 +838,7 @@ def test_locking_leaves_a_newer_copy_by_the_user_alone(
 @pytest.mark.usefixtures("alice")
 def test_copy_of_an_unknown_entry_copies_nothing(run: Run, clipboard: Clipboard) -> None:
     fake = unlocked(run, "copy github")
-    assert "Error: there is no entry with that name.\n" in fake.text
+    assert "Error: there is no entry with that name or ID.\n" in fake.text
     assert clipboard.backend.written == []
 
 
@@ -959,3 +980,128 @@ def test_passwd_takes_no_arguments(run: Run) -> None:
 
 def test_passwd_needs_an_unlocked_vault(run: Run) -> None:
     assert cli.UNKNOWN_COMMAND in run("passwd").text
+
+
+# --- Entries with the same name, and IDs (T29) ---------------------------------------
+
+ADD_PERSONAL = ("add github", "alice@personal.com", "", "")
+ADD_WORK = ("add GitHub", "alice@work.com", "", "")
+PERSONAL_SECRET = "the-Personal-one-1"
+
+
+@pytest.fixture
+def two_githubs(run: Run, accounts: Accounts) -> list[str]:
+    """Alice with two entries named github; returns their short IDs, oldest first."""
+    accounts.register("alice", PASSWORD)
+    unlocked(run, *ADD_PERSONAL, *ADD_WORK, secrets=[PERSONAL_SECRET] * 2 + [SECRET] * 2)
+    return short_ids(accounts, "github")
+
+
+def test_two_entries_can_have_the_same_name(run: Run, two_githubs: list[str]) -> None:
+    personal, work = two_githubs
+    fake = unlocked(run, "add mail", "alice", "", "", "list", secrets=[SECRET, SECRET])
+    assert "already" not in fake.text
+    rows = fake.text.split("3 entries:\n", 1)[1]
+    assert rows.startswith(
+        f"  {personal}  github  login  alice@personal.com\n"
+        f"  {work}  GitHub  login  alice@work.com\n"
+    )
+    assert re.match(rf"  {SHORT_ID}  mail    login  alice\n", rows.splitlines(True)[2])
+
+
+@pytest.mark.parametrize("command", ["rm", "edit"])
+def test_rm_and_edit_refuse_a_shared_name_and_show_the_ids(
+    run: Run, accounts: Accounts, two_githubs: list[str], command: str
+) -> None:
+    personal, work = two_githubs
+    fake = unlocked(run, f"{command} github", "yes")
+    assert (
+        "2 entries are named github:\n"
+        f"  {personal}  github  login  alice@personal.com\n"
+        f"  {work}  GitHub  login  alice@work.com\n"
+        "To change or delete one of them, use its ID, "
+        f"for example: {command} {personal}\n"
+    ) in fake.text
+    assert "Type yes" not in fake.text
+    assert "Editing" not in fake.text
+    assert "Vault unlocked. Saved 2 times." in unlocked(run).text  # nothing was saved
+
+
+def test_rm_by_id_deletes_that_entry_only(
+    run: Run, accounts: Accounts, two_githubs: list[str]
+) -> None:
+    personal, work = two_githubs
+    fake = unlocked(run, f"rm {work}", "yes")
+    assert "  Username: alice@work.com\n" in fake.text
+    assert f"Deleted GitHub ({work}).\n" in fake.text
+    assert short_ids(accounts, "github") == [personal]
+    assert stored_password(accounts, "github") == PERSONAL_SECRET
+
+
+def test_edit_by_id_changes_that_entry_only(
+    run: Run, accounts: Accounts, two_githubs: list[str]
+) -> None:
+    personal, work = two_githubs
+    fake = unlocked(run, f"edit {work.upper()}", "", "bob@work.com", "", "", secrets=[""])
+    assert f"Editing GitHub ({work}). " in fake.text
+    session = accounts.login("alice", PASSWORD)
+    assert [s.username for s in session.find("github")] == [
+        "alice@personal.com",
+        "bob@work.com",
+    ]
+
+
+def test_copy_with_a_shared_name_asks_which_one(
+    run: Run, clipboard: Clipboard, two_githubs: list[str]
+) -> None:
+    personal, work = two_githubs
+    fake = unlocked(run, "copy github", "2")
+    assert (
+        "2 entries are named github:\n"
+        f"  1) {personal}  github  login  alice@personal.com\n"
+        f"  2) {work}  GitHub  login  alice@work.com\n"
+        "Which one (1-2, Enter cancels)? "
+    ) in fake.text
+    assert clipboard.backend.written == [SECRET]  # the second one's password
+    assert f"Copied the password of GitHub ({work})." in fake.text
+    for secret in (SECRET, PERSONAL_SECRET):
+        assert secret not in fake.text
+
+
+def test_show_with_a_shared_name_asks_which_one(run: Run, two_githubs: list[str]) -> None:
+    personal, _ = two_githubs
+    fake = unlocked(run, "show GITHUB", "1")
+    assert f"  ID:       {personal}\n  Name:     github\n" in fake.text
+
+
+@pytest.mark.parametrize(
+    ("answer", "shown"), [("", "Cancelled."), ("3", None), ("x", None), ("\u00b2", None)]
+)
+def test_the_choice_can_be_cancelled_and_must_be_in_range(
+    run: Run, clipboard: Clipboard, two_githubs: list[str], answer: str, shown: str | None
+) -> None:
+    fake = unlocked(run, "copy github", answer)
+    assert (shown or "Error: type a number from 1 to 2.") + "\n" in fake.text
+    assert clipboard.backend.written == []
+
+
+def test_copy_by_id_does_not_ask(run: Run, clipboard: Clipboard, two_githubs: list[str]) -> None:
+    personal, _ = two_githubs
+    fake = unlocked(run, f"copy {personal}")
+    assert "Which one" not in fake.text
+    assert clipboard.backend.written == [PERSONAL_SECRET]
+
+
+@pytest.mark.usefixtures("alice")
+def test_an_id_start_shared_by_two_entries_is_refused_for_rm(
+    run: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = iter(["3f9c0d1" + "0" * 25, "3f9c0d2" + "0" * 25])
+    monkeypatch.setattr(entries, "secrets", SimpleNamespace(token_hex=lambda size: next(made)))
+    fake = unlocked(run, *ADD_PERSONAL, "add mail", "", "", "", "rm 3f9c0d", secrets=[SECRET] * 4)
+    assert (
+        "2 entries have an ID that starts with 3f9c0d:\n"
+        "  3f9c0d1  github  login  alice@personal.com\n"
+        "  3f9c0d2  mail    login\n"
+        "To change or delete one of them, use its ID, for example: rm 3f9c0d1\n"
+    ) in fake.text
