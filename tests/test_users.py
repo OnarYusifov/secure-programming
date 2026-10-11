@@ -353,6 +353,14 @@ GITHUB = entries.new_login(
 ).to_json()
 
 
+def test_two_entries_with_one_name_load(accounts: Accounts) -> None:
+    accounts.register("alice", PASSWORD)
+    other = entries.new_login("github", username="bob", password="x", url="", notes="")
+    save_body(accounts, "alice", Body(2, (GITHUB, other.to_json())))
+    session = accounts.login("alice", PASSWORD)
+    assert sorted(s.username for s in session.find("github")) == ["alice", "bob"]
+
+
 def test_login_reads_the_saved_counter_and_entries(accounts: Accounts) -> None:
     accounts.register("alice", PASSWORD)
     save_body(accounts, "alice", Body(41, (GITHUB,)))
@@ -366,7 +374,7 @@ def test_login_reads_the_saved_counter_and_entries(accounts: Accounts) -> None:
     [
         Body(1, ({"name": "github"},)),  # fields missing
         Body(1, ({**GITHUB, "type": "totp"},)),  # a type this version does not know
-        Body(2, (GITHUB, {**GITHUB, "name": "GitHub"})),  # the same name twice
+        Body(2, (GITHUB, {**GITHUB, "name": "mail"})),  # the same ID twice
     ],
 )
 def test_a_body_with_a_malformed_entry_fails_and_its_dek_is_wiped(

@@ -29,7 +29,7 @@ from typing import NamedTuple
 
 from yunarpass import __version__, entries, policy, secrets_gen
 from yunarpass.clipboard import ClipboardError, ClipboardGuard, system_clipboard
-from yunarpass.entries import MASK, EntryError
+from yunarpass.entries import MASK, EntryError, EntryView
 from yunarpass.policy import PolicyError
 from yunarpass.session import Session, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
@@ -239,9 +239,8 @@ class Repl:
 
     def add(self, args: str) -> None:
         session = self._unlocked()
-        name = _entry_name("add", args)
         # Each answer is checked as soon as it is typed, the name first.
-        session.check_new_name(name)
+        name = _entry_name("add", args)
         username = entries.check_username(self.ask("Username: "))
         typed = self.console.read_secret(f"Password (or {GENERATE} to generate one): ")
         password = self._entry_password(typed)
@@ -263,6 +262,16 @@ class Repl:
             raise UsageError("the two passwords are different, so nothing was saved")
         return password
 
+    def _only(self, command: str, args: str) -> EntryView:
+        """The one entry named in the arguments."""
+        session = self._unlocked()
+        matches = session.find(_entry_name(command, args))
+        if not matches:
+            raise EntryError("there is no entry with that name")
+        if len(matches) > 1:
+            raise UsageError("several entries have that name")
+        return session.view(matches[0].id)
+
     def list_entries(self, args: str) -> None:
         _no_arguments("list", args)
         summaries = self._unlocked().summaries()
@@ -277,7 +286,7 @@ class Repl:
         )
 
     def show(self, args: str) -> None:
-        view = self._unlocked().view(_entry_name("show", args))
+        view = self._only("show", args)
         notes = view.notes.split("\n")
         rows = [
             ("Name", view.name),
@@ -296,13 +305,13 @@ class Repl:
 
     def edit(self, args: str) -> None:
         session = self._unlocked()
-        view = session.view(_entry_name("edit", args))
+        view = self._only("edit", args)
         self.say(f"Editing {view.name}. Press Enter to keep a value, or type - to clear it.")
         new_name: str | None = self.ask(f"Name [{view.name}]: ")
         if not new_name or new_name == view.name:
             new_name = None
-        elif entries.key(new_name) != entries.key(view.name):
-            session.check_new_name(new_name)
+        else:
+            entries.check_name(new_name)
         username = self._changed("Username", view.username, entries.check_username)
         typed = self.console.read_secret(
             f"Password (Enter keeps the current one, {GENERATE} generates a new one): "
@@ -314,8 +323,8 @@ class Repl:
             self.say("Nothing changed.")
             return
         session.update(
-            view.name,
-            new_name=new_name,
+            view.id,
+            name=new_name,
             username=username,
             password=password,
             url=url,
@@ -333,17 +342,18 @@ class Repl:
 
     def rm(self, args: str) -> None:
         session = self._unlocked()
-        view = session.view(_entry_name("rm", args))
+        view = self._only("rm", args)
         if self.ask(f"Type {view.name} again to delete it: ") != view.name:
             self.say("The names are different, so nothing was deleted.")
             return
-        session.remove(view.name)
+        session.remove(view.id)
         self.say(f"Deleted {view.name}.")
 
     def copy(self, args: str) -> None:
         session = self._unlocked()
-        name = session.view(_entry_name("copy", args)).name
-        session.copy_password(name, self.clipboard)
+        view = self._only("copy", args)
+        name = view.name
+        session.copy_password(view.id, self.clipboard)
         self.say(
             f"Copied the password of {name}. "
             f"The clipboard is cleared in {self.clipboard.seconds:g} seconds."

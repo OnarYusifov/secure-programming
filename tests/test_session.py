@@ -1,4 +1,7 @@
-"""Tests for the unlocked session and its entries (threats T6, T9, T13, T18, T19, T25, T28)."""
+"""Tests for the unlocked session and its entries.
+
+Threats T6, T9, T13, T18, T19, T25, T28, T29.
+"""
 
 import dataclasses
 from collections.abc import Callable
@@ -43,8 +46,17 @@ def on_disk(session: Session) -> VaultFile:
     return vaultfile.parse(vault_path(session).read_bytes())
 
 
-def add_github(session: Session, name: str = "github", **changes: str) -> None:
-    session.add(name, **{**FIELDS, "password": SECRET, **changes})
+def add_github(session: Session, name: str = "github", **changes: str) -> str:
+    """Add an entry; return its full ID."""
+    return session.add(name, **{**FIELDS, "password": SECRET, **changes}).id
+
+
+def password_of(session: Session, entry_id: str) -> str:
+    return session._entries[entry_id].password
+
+
+def names(session: Session) -> list[str]:
+    return [summary.name for summary in session.summaries()]
 
 
 # --- The session itself --------------------------------------------------------------
@@ -71,135 +83,196 @@ def test_close_wipes_the_dek_and_drops_the_entries(session: Session) -> None:
 @pytest.mark.parametrize(
     "use",
     [
-        lambda s: s.summaries(),
-        lambda s: s.view("github"),
-        lambda s: s.check_new_name("mail"),
-        lambda s: add_github(s, "mail"),
-        lambda s: s.update("github", username="bob"),
-        lambda s: s.remove("github"),
+        lambda s, entry_id: s.summaries(),
+        lambda s, entry_id: s.find("github"),
+        lambda s, entry_id: s.view(entry_id),
+        lambda s, entry_id: add_github(s, "mail"),
+        lambda s, entry_id: s.update(entry_id, username="bob"),
+        lambda s, entry_id: s.remove(entry_id),
     ],
 )
 def test_a_closed_session_refuses_everything(
-    session: Session, use: Callable[[Session], object]
+    session: Session, use: Callable[[Session, str], object]
 ) -> None:
-    add_github(session)
+    entry_id = add_github(session)
     before = vault_path(session).read_bytes()
     session.close()
     with pytest.raises(VaultLockedError, match="the vault is locked"):
-        use(session)
+        use(session, entry_id)
     # Nothing was written, least of all a body sealed under the zeroed DEK.
     assert vault_path(session).read_bytes() == before
 
 
-# --- Add, view, update, remove (UC3) -------------------------------------------------
+# --- Add, find, view, update, remove (UC3, T29) --------------------------------------
 
 
-def test_add_then_view_without_the_password(session: Session) -> None:
-    add_github(session)
-    view = session.view("github")
-    assert (view.name, view.type, view.username, view.url, view.notes) == (
-        "github", "login", "alice@example.com", "https://github.com", "personal",
+def test_add_returns_the_summary_and_view_has_no_password(session: Session) -> None:
+    summary = session.add("github", **FIELDS, password=SECRET)
+    assert (summary.short_id, summary.name, summary.type, summary.username) == (
+        summary.id[:6], "github", "login", "alice@example.com",
+    )  # fmt: skip
+    view = session.view(summary.id)
+    assert (view.id, view.short_id, view.name, view.type) == (
+        summary.id, summary.short_id, "github", "login",
+    )  # fmt: skip
+    assert (view.username, view.url, view.notes) == (
+        "alice@example.com", "https://github.com", "personal",
     )  # fmt: skip
     assert view.created == view.modified
-    assert SECRET not in repr(view)
+    assert SECRET not in repr(view) + repr(summary)
 
 
-def test_summaries_are_sorted_without_regard_to_case(session: Session) -> None:
-    for name in ("mail", "Bank", "github", "a.example"):
+def test_summaries_are_sorted_by_name_then_from_the_oldest(session: Session) -> None:
+    first = add_github(session, "github")
+    for name in ("mail", "Bank", "a.example"):
         add_github(session, name)
-    assert [s.name for s in session.summaries()] == ["a.example", "Bank", "github", "mail"]
+    second = add_github(session, "GitHub")
+    assert names(session) == ["a.example", "Bank", "github", "GitHub", "mail"]
+    assert [s.id for s in session.summaries()][2:4] == [first, second]
     assert {s.type for s in session.summaries()} == {"login"}
 
 
-def test_names_are_found_and_kept_unique_without_regard_to_case(session: Session) -> None:
-    add_github(session, "GitHub")
-    assert session.view("github").name == "GitHub"
-    with pytest.raises(EntryError, match="already exists"):
-        add_github(session, "GITHUB")
-    with pytest.raises(EntryError, match="already exists"):
-        session.check_new_name("github")
+def test_two_entries_may_have_the_same_name(accounts: Accounts, session: Session) -> None:
+    personal = add_github(session, username="alice@personal.com")
+    work = add_github(session, "GitHub", username="alice@work.com")
+    assert personal != work
+    session.close()
+    again = accounts.login("alice", PASSWORD)  # both survive a lock and a login
+    assert [(s.id, s.username) for s in again.find("github")] == [
+        (personal, "alice@personal.com"),
+        (work, "alice@work.com"),
+    ]
 
 
-def test_an_unknown_name_is_refused(session: Session) -> None:
-    for use in (session.view, session.remove, lambda name: session.update(name, url="")):
-        with pytest.raises(EntryError, match="there is no entry with that name"):
-            use("github")
+def test_find_by_name_without_regard_to_case(session: Session) -> None:
+    entry_id = add_github(session, "GitHub")
+    add_github(session, "mail")
+    for ref in ("github", "GITHUB", "GitHub"):
+        assert [s.id for s in session.find(ref)] == [entry_id]
+    assert session.find("gitlab") == []
 
 
-def test_a_name_off_the_allow_list_is_refused_before_any_lookup(session: Session) -> None:
+def test_find_by_the_start_of_an_id(session: Session) -> None:
+    entry_id = add_github(session)
+    add_github(session, "mail")
+    for ref in (entry_id[:6], entry_id[:7], entry_id, entry_id[:6].upper()):
+        assert [s.id for s in session.find(ref)] == [entry_id]
+    assert session.find(entry_id[:5]) == []  # five characters are a name, not an ID
+
+
+def test_an_ambiguous_start_of_an_id_finds_every_match(session: Session) -> None:
+    for name in ("a", "b", "c"):
+        add_github(session, name)
+    # Give two entries IDs that start alike, as random IDs now and then will.
+    renamed = {}
+    for entry, start in zip(
+        list(session._entries.values())[:2], ("3f9c0d1", "3f9c0d2"), strict=True
+    ):
+        moved = dataclasses.replace(entry, id=start + entry.id[7:])
+        renamed[entry.id] = moved
+    session._entries = {
+        renamed.get(k, e).id: renamed.get(k, e) for k, e in session._entries.items()
+    }
+    assert [s.name for s in session.find("3f9c0d")] == ["a", "b"]
+    assert [s.short_id for s in session.find("3f9c0d")] == ["3f9c0d1", "3f9c0d2"]
+    assert [s.name for s in session.find("3f9c0d2")] == ["b"]
+
+
+def test_an_id_wins_over_a_name_that_looks_like_one(session: Session) -> None:
+    entry_id = add_github(session)
+    add_github(session, entry_id[:6])  # an entry named like the first one's ID
+    assert [s.name for s in session.find(entry_id[:6])] == ["github"]
+
+
+def test_find_refuses_what_is_neither_a_name_nor_an_id(session: Session) -> None:
     with pytest.raises(EntryError, match="an entry name has"):
-        session.view("../github")
+        session.find("../github")
+
+
+def test_methods_that_change_an_entry_need_its_full_id(session: Session) -> None:
+    entry_id = add_github(session)
+    uses: list[Callable[[str], object]] = [
+        session.view,
+        session.remove,
+        lambda ref: session.update(ref, url=""),
+    ]
+    for use in uses:
+        for ref in ("github", entry_id[:6], "0" * 32):
+            with pytest.raises(EntryError, match="there is no entry with that ID"):
+                use(ref)
+    assert session.counter == 1
+
+
+def test_a_name_off_the_allow_list_is_refused(session: Session) -> None:
     with pytest.raises(EntryError, match="an entry name has"):
         add_github(session, "two words")
     assert session.counter == 0  # nothing was saved
 
 
 def test_update_changes_only_the_given_fields(session: Session) -> None:
-    add_github(session)
-    created = session.view("github").created
-    session.update("github", username="bob", notes="")
-    view = session.view("github")
+    entry_id = add_github(session)
+    created = session.view(entry_id).created
+    session.update(entry_id, username="bob", notes="")
+    view = session.view(entry_id)
     assert (view.username, view.url, view.notes) == ("bob", "https://github.com", "")
     assert view.created == created
-    assert session._entries["github"].password == SECRET  # None kept the password
+    assert password_of(session, entry_id) == SECRET  # None kept the password
 
 
 def test_update_can_change_the_password(session: Session) -> None:
-    add_github(session)
-    session.update("github", password="a new password")
-    assert session._entries["github"].password == "a new password"
+    entry_id = add_github(session)
+    session.update(entry_id, password="a new password")
+    assert password_of(session, entry_id) == "a new password"
 
 
-def test_update_can_rename_but_not_onto_another_entry(session: Session) -> None:
-    add_github(session)
+def test_update_can_rename_also_onto_a_name_in_use(session: Session) -> None:
+    entry_id = add_github(session)
     add_github(session, "mail")
-    session.update("github", new_name="GitHub")  # only the case changes
-    session.update("GitHub", new_name="code")
-    assert [s.name for s in session.summaries()] == ["code", "mail"]
-    with pytest.raises(EntryError, match="already exists"):
-        session.update("code", new_name="MAIL")
+    session.update(entry_id, name="MAIL")
+    assert names(session) == ["MAIL", "mail"]  # the renamed one is older
+    assert session.view(entry_id).name == "MAIL"
     with pytest.raises(EntryError, match="an entry name has"):
-        session.update("code", new_name="two words")
+        session.update(entry_id, name="two words")
 
 
 def test_update_checks_every_field(session: Session) -> None:
-    add_github(session)
+    entry_id = add_github(session)
     with pytest.raises(EntryError, match="control character"):
-        session.update("github", url="\x1b]8;;evil\x07")
+        session.update(entry_id, url="\x1b]8;;evil\x07")
     with pytest.raises(EntryError, match="needs a password"):
-        session.update("github", password="")
-    assert session.view("github").url == "https://github.com"
+        session.update(entry_id, password="")
+    assert session.view(entry_id).url == "https://github.com"
 
 
-def test_remove(session: Session) -> None:
-    add_github(session)
-    add_github(session, "mail")
-    session.remove("GITHUB")
-    assert [s.name for s in session.summaries()] == ["mail"]
+def test_remove_deletes_only_that_entry(session: Session) -> None:
+    personal = add_github(session)
+    work = add_github(session)
+    session.remove(work)
+    assert [s.id for s in session.summaries()] == [personal]
 
 
 # --- Saving (T6, T9, T10) ------------------------------------------------------------
 
 
 def test_changes_persist_across_lock_and_login(accounts: Accounts, session: Session) -> None:
-    add_github(session)
-    add_github(session, "mail")
+    github = add_github(session)
+    mail = add_github(session, "mail")
     add_github(session, "bank")
-    session.update("github", new_name="code", password="a new password")
-    session.remove("mail")
+    session.update(github, name="code", password="a new password")
+    session.remove(mail)
     session.close()
     again = accounts.login("alice", PASSWORD)
     assert again.counter == 5
-    assert [s.name for s in again.summaries()] == ["bank", "code"]
-    assert again._entries["code"].password == "a new password"
-    assert again.view("code").username == "alice@example.com"
+    assert names(again) == ["bank", "code"]
+    assert password_of(again, github) == "a new password"
+    assert again.view(github).username == "alice@example.com"
 
 
 def test_every_save_counts_up_and_uses_a_fresh_nonce(session: Session) -> None:
-    add_github(session)
+    entry_id = add_github(session)
     seen = [on_disk(session).body]
     for _ in range(2):  # the same content each time, apart from the counter
-        session.update("github", notes="personal")
+        session.update(entry_id, notes="personal")
         seen.append(on_disk(session).body)
     assert session.counter == 3
     assert len({body.nonce for body in seen}) == 3
@@ -214,10 +287,10 @@ def test_only_the_body_changes_on_a_save(session: Session) -> None:
 
 
 def test_no_entry_text_appears_in_the_file(session: Session) -> None:
-    add_github(session, "my-bank", username="jürgen-1987", notes="pin is 4321")
+    entry_id = add_github(session, "my-bank", username="jürgen-1987", notes="pin is 4321")
     data = vault_path(session).read_bytes()
     backup = vault_path(session).with_name(vault_path(session).name + ".bak").read_bytes()
-    for plaintext in ("my-bank", "jürgen", "j\\u00fcrgen", "4321", SECRET, "github.com"):
+    for plaintext in ("my-bank", "jürgen", "j\\u00fcrgen", "4321", SECRET, "github.com", entry_id):
         assert plaintext.encode() not in data
         assert plaintext.encode() not in backup
 
@@ -225,17 +298,17 @@ def test_no_entry_text_appears_in_the_file(session: Session) -> None:
 def test_a_failed_save_changes_nothing_in_memory(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    add_github(session)
+    entry_id = add_github(session)
 
     def broken(name: str, data: bytes) -> None:
         raise StorageError("a data file could not be written")
 
     monkeypatch.setattr(session._data_dir, "write", broken)
     with pytest.raises(StorageError):
-        session.remove("github")
+        session.remove(entry_id)
     with pytest.raises(StorageError):
         add_github(session, "mail")
-    assert [s.name for s in session.summaries()] == ["github"]
+    assert names(session) == ["github"]
     assert session.counter == 1
 
 
@@ -259,7 +332,7 @@ def test_a_save_by_another_session_is_not_overwritten(accounts: Accounts) -> Non
         add_github(second, "mail")
     assert isinstance(VaultChangedError(), StorageError)  # shown to the user as is
     third = accounts.login("alice", PASSWORD)
-    assert [s.name for s in third.summaries()] == ["github"]  # the first change survived
+    assert names(third) == ["github"]  # the first change survived
     add_github(first, "mail")  # the first session can go on saving
 
 
@@ -302,19 +375,20 @@ def guard(backend: MemoryClipboard) -> ClipboardGuard:
     return ClipboardGuard(backend, lambda seconds, callback: lambda: None)
 
 
-def test_copy_password_hands_the_password_to_the_clipboard_only(session: Session) -> None:
-    add_github(session)
+def test_copy_password_copies_the_password_of_that_entry_only(session: Session) -> None:
+    add_github(session, password="the personal one")
+    work = add_github(session)
     backend = MemoryClipboard()
-    session.copy_password("GitHub", guard(backend))
+    session.copy_password(work, guard(backend))
     assert backend.text == SECRET
 
 
 def test_copy_password_refuses_an_unknown_entry_or_a_closed_session(session: Session) -> None:
     backend = MemoryClipboard()
     with pytest.raises(EntryError, match="no entry"):
-        session.copy_password("github", guard(backend))
-    add_github(session)
+        session.copy_password("0" * 32, guard(backend))
+    entry_id = add_github(session)
     session.close()
     with pytest.raises(VaultLockedError):
-        session.copy_password("github", guard(backend))
+        session.copy_password(entry_id, guard(backend))
     assert backend.text is None
