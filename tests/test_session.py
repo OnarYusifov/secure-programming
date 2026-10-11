@@ -1,9 +1,10 @@
 """Tests for the unlocked session and its entries.
 
-Threats T6, T9, T13, T18, T19, T25, T28, T29.
+Threats T6, T9, T13, T15, T18, T19, T25, T28, T29.
 """
 
 import dataclasses
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -11,11 +12,12 @@ import pytest
 
 from yunarpass import crypto, storage, vaultfile
 from yunarpass.clipboard import ClipboardGuard
+from yunarpass.crypto import Sealed
 from yunarpass.entries import EntryError
 from yunarpass.session import Session, VaultChangedError, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
 from yunarpass.users import Accounts, Backoff
-from yunarpass.vaultfile import VaultFile
+from yunarpass.vaultfile import Body, VaultFile
 
 PASSWORD = "correct horse battery staple"
 SECRET = "s3cret-Password!"
@@ -101,6 +103,58 @@ def test_a_closed_session_refuses_everything(
         use(session, entry_id)
     # Nothing was written, least of all a body sealed under the zeroed DEK.
     assert vault_path(session).read_bytes() == before
+
+
+# --- Closing from another thread (T13, T15) ------------------------------------------
+
+
+def close_on_another_thread(session: Session) -> threading.Thread:
+    """Call close() from another thread, as the auto-lock timer does, and check that it waits."""
+    closer = threading.Thread(target=session.close)
+    closer.start()
+    closer.join(timeout=0.2)
+    assert closer.is_alive(), "close() did not wait for the method using the DEK"
+    return closer
+
+
+def test_close_waits_for_a_save_in_progress(
+    accounts: Accounts, session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seal_body = vaultfile.seal_body
+    closers: list[threading.Thread] = []
+
+    def seal_while_closing(header: vaultfile.Header, dek: crypto.Key, body: Body) -> Sealed:
+        closers.append(close_on_another_thread(session))
+        return seal_body(header, dek, body)
+
+    monkeypatch.setattr(vaultfile, "seal_body", seal_while_closing)
+    add_github(session)
+    (closer,) = closers
+    closer.join()
+    assert session.closed
+    # The body was sealed under the real DEK, not a zeroed one.
+    assert names(accounts.login("alice", PASSWORD)) == ["github"]
+
+
+def test_close_waits_for_a_password_change_in_progress(
+    accounts: Accounts, session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rewrap_password = vaultfile.rewrap_password
+    closers: list[threading.Thread] = []
+
+    def rewrap_while_closing(vault: VaultFile, dek: crypto.Key, password: str) -> VaultFile:
+        closers.append(close_on_another_thread(session))
+        return rewrap_password(vault, dek, password)
+
+    monkeypatch.setattr(vaultfile, "rewrap_password", rewrap_while_closing)
+    add_github(session)
+    session.change_password(PASSWORD, "a brand new passphrase")
+    (closer,) = closers
+    closer.join()
+    assert session.closed
+    assert session._dek == bytearray(crypto.KEY_BYTES)
+    # The new password copy wraps the real DEK: the vault still opens.
+    assert names(accounts.login("alice", "a brand new passphrase")) == ["github"]
 
 
 # --- Add, find, view, update, remove (UC3, T29) --------------------------------------
