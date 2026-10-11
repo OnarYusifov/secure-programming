@@ -1,4 +1,4 @@
-"""Tests for the REPL (threats T3, T16, T17, T19, T25, T28)."""
+"""Tests for the REPL (threats T3, T16, T17, T18, T19, T20, T25, T28)."""
 
 import getpass
 import io
@@ -10,8 +10,9 @@ from typing import Protocol
 
 import pytest
 
-from yunarpass import __version__, cli, entries, storage, vaultfile
+from yunarpass import __version__, cli, entries, secrets_gen, storage, vaultfile
 from yunarpass.cli import Console, Repl
+from yunarpass.clipboard import ClipboardError, ClipboardGuard, NoClipboard
 from yunarpass.session import Session, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
 from yunarpass.users import AccountError, Accounts, Backoff
@@ -68,18 +69,69 @@ def no_sleep(seconds: float) -> None:
     pass  # the login delay itself is tested in test_users.py
 
 
+class MemoryClipboard:
+    """A clipboard backend in memory, with every write recorded."""
+
+    def __init__(self) -> None:
+        self.text: str | None = None
+        self.written: list[str] = []
+        self.broken = False
+
+    def read(self) -> str | None:
+        return self.text
+
+    def write(self, text: str) -> None:
+        if self.broken:
+            raise ClipboardError("the clipboard could not be used")
+        self.written.append(text)
+        self.text = text
+
+    def clear(self) -> None:
+        if self.broken:
+            raise ClipboardError("the clipboard could not be used")
+        self.text = None
+
+
+class Clipboard:
+    """A guard on a memory clipboard, whose timers run only when fired."""
+
+    def __init__(self) -> None:
+        self.backend = MemoryClipboard()
+        self.timers: list[tuple[float, Callable[[], None]]] = []
+        self.guard = ClipboardGuard(self.backend, self._call_later)
+
+    def _call_later(self, seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
+        self.timers.append((seconds, callback))
+        return lambda: None
+
+    def fire(self) -> None:
+        for _, callback in self.timers:
+            callback()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Repl made without a clipboard must not reach the one of whoever runs the tests."""
+    monkeypatch.setattr(cli, "system_clipboard", lambda: NoClipboard("not in tests"))
+
+
 @pytest.fixture
 def accounts(tmp_path: Path) -> Accounts:
     return Accounts(DataDir.open(tmp_path / "data"), Backoff(sleep=no_sleep))
 
 
 @pytest.fixture
-def run(accounts: Accounts) -> Run:
+def clipboard() -> Clipboard:
+    return Clipboard()
+
+
+@pytest.fixture
+def run(accounts: Accounts, clipboard: Clipboard) -> Run:
     """Run the REPL on typed lines and secrets until the input runs out."""
 
     def run_repl(*lines: Typed, secrets: Iterable[Typed] = ()) -> FakeConsole:
         fake = FakeConsole(lines, secrets)
-        assert Repl(accounts, fake.console()).run() == 0
+        assert Repl(accounts, fake.console(), clipboard.guard).run() == 0
         return fake
 
     return run_repl
@@ -426,13 +478,15 @@ def test_unlocked_the_prompt_offers_only_the_unlocked_commands(run: Run) -> None
     fake = run("login", "alice", "help", "register", "login", secrets=[PASSWORD])
     assert (
         "Commands:\n"
-        "  add <name>   Add a login entry\n"
-        "  list         List the entries\n"
-        "  show <name>  Show an entry; the password stays masked\n"
-        "  edit <name>  Change an entry\n"
-        "  rm <name>    Delete an entry\n"
-        "  help         Show this list\n"
-        "  quit         Lock the vault and exit\n"
+        "  add <name>    Add a login entry\n"
+        "  list          List the entries\n"
+        "  show <name>   Show an entry; the password stays masked\n"
+        "  copy <name>   Copy an entry's password to the clipboard\n"
+        "  edit <name>   Change an entry\n"
+        "  rm <name>     Delete an entry\n"
+        "  gen [length]  Copy a new random password to the clipboard\n"
+        "  help          Show this list\n"
+        "  quit          Lock the vault and exit\n"
     ) in fake.text
     assert fake.text.count(cli.UNKNOWN_COMMAND) == 2
 
@@ -475,7 +529,11 @@ def unlocked(run: Run, *lines: Typed, secrets: Iterable[Typed] = ()) -> FakeCons
 @pytest.mark.usefixtures("alice")
 def test_add_then_list_and_show(run: Run) -> None:
     fake = unlocked(run, *ADD_GITHUB, "list", "show github", secrets=[SECRET, SECRET])
-    assert fake.secret_prompts == ["Master password: ", "Password: ", "Repeat the password: "]
+    assert fake.secret_prompts == [
+        "Master password: ",
+        "Password (or gen to generate one): ",
+        "Repeat the password: ",
+    ]
     assert "Added github.\n" in fake.text
     assert "1 entry:\n  github  login\n" in fake.text
     assert re.search(
@@ -617,7 +675,9 @@ def test_edit_keeps_on_enter_clears_on_a_dash_and_renames(run: Run) -> None:
         "Notes [personal]: ",
     ):
         assert prompt in fake.text
-    assert fake.secret_prompts[-1] == "Password (Enter keeps the current one): "
+    assert fake.secret_prompts[-1] == (
+        "Password (Enter keeps the current one, gen generates a new one): "
+    )
     assert "Saved the changes to code.\n" in fake.text
     assert "  Username:\n" in fake.text
     assert "  URL:      https://example.com\n" in fake.text
@@ -734,3 +794,127 @@ def test_entry_commands_need_an_unlocked_vault(accounts: Accounts) -> None:
     repl = Repl(accounts, FakeConsole().console())
     with pytest.raises(VaultLockedError):
         repl.add("github")
+
+
+# --- copy and gen (UC4, UC5; T18, T20, T25) ------------------------------------------
+
+
+@pytest.mark.usefixtures("alice")
+def test_copy_puts_the_password_on_the_clipboard_and_never_prints_it(
+    run: Run, clipboard: Clipboard
+) -> None:
+    fake = unlocked(run, *ADD_GITHUB, "copy GitHub", secrets=[SECRET, SECRET])
+    assert clipboard.backend.written == [SECRET]
+    assert [seconds for seconds, _ in clipboard.timers] == [20]
+    assert "Copied the password of github. The clipboard is cleared in 20 seconds.\n" in fake.text
+    assert SECRET not in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_quit_clears_the_clipboard(run: Run, clipboard: Clipboard) -> None:
+    fake = unlocked(run, *ADD_GITHUB, "copy github", "quit", secrets=[SECRET, SECRET])
+    assert clipboard.backend.written == [SECRET]
+    assert clipboard.backend.text is None
+    assert fake.text.endswith("Vault locked.\n")
+
+
+@pytest.mark.usefixtures("alice")
+def test_locking_leaves_a_newer_copy_by_the_user_alone(
+    accounts: Accounts, clipboard: Clipboard
+) -> None:
+    fake = FakeConsole(["alice", "", "", ""], [PASSWORD, SECRET, SECRET])
+    repl = Repl(accounts, fake.console(), clipboard.guard)
+    for line in ("login", "add github", "copy github"):
+        repl.execute(line)
+    clipboard.backend.text = "something the user copied"
+    repl.lock()
+    assert clipboard.backend.text == "something the user copied"
+
+
+@pytest.mark.usefixtures("alice")
+def test_copy_of_an_unknown_entry_copies_nothing(run: Run, clipboard: Clipboard) -> None:
+    fake = unlocked(run, "copy github")
+    assert "Error: there is no entry with that name.\n" in fake.text
+    assert clipboard.backend.written == []
+
+
+@pytest.mark.usefixtures("alice")
+def test_a_clipboard_error_is_shown(run: Run, clipboard: Clipboard) -> None:
+    clipboard.backend.broken = True
+    fake = unlocked(run, *ADD_GITHUB, "copy github", "gen", secrets=[SECRET, SECRET])
+    assert fake.text.count("Error: the clipboard could not be used.\n") == 2
+
+
+@pytest.mark.usefixtures("alice")
+def test_without_a_clipboard_copy_says_why_and_quit_still_works(accounts: Accounts) -> None:
+    fake = FakeConsole(["login", "alice", *ADD_GITHUB, "copy github"], [PASSWORD, SECRET, SECRET])
+    assert Repl(accounts, fake.console()).run() == 0  # the system clipboard: none in tests
+    assert "Error: not in tests.\n" in fake.text
+    assert fake.text.endswith("Vault locked.\n")
+
+
+@pytest.mark.usefixtures("alice")
+def test_a_failed_clear_at_quit_is_reported(run: Run, clipboard: Clipboard) -> None:
+    fake = unlocked(run, *ADD_GITHUB, "copy github", secrets=[SECRET, SECRET])
+    assert fake.text.endswith("Vault locked.\n")  # cleared without trouble
+    clipboard.guard.copy(SECRET)
+    clipboard.backend.broken = True
+    fake = unlocked(run)
+    assert fake.text.endswith("Error: the clipboard could not be used.\nVault locked.\n")
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize(("args", "length"), [("", 20), (" 12", 12), (" 128", 128), (" 032", 32)])
+def test_gen_copies_a_new_password_and_never_prints_it(
+    run: Run, clipboard: Clipboard, args: str, length: int
+) -> None:
+    fake = unlocked(run, f"gen{args}")
+    (password,) = clipboard.backend.written
+    assert len(password) == length
+    assert set(password) <= set(secrets_gen.ALPHABET)
+    assert password not in fake.text
+    assert (
+        f"Copied a new {length}-character password. The clipboard is cleared in 20 seconds.\n"
+    ) in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize("args", ["11", "129", "0", "-20", "abc", "20 30", "1e2", "\u0663\u0662"])
+def test_gen_refuses_a_bad_length(run: Run, clipboard: Clipboard, args: str) -> None:
+    fake = unlocked(run, f"gen {args}")
+    assert "Error: gen takes a length from 12 to 128: gen [length].\n" in fake.text
+    assert clipboard.backend.written == []
+
+
+def test_gen_needs_an_unlocked_vault(run: Run, clipboard: Clipboard) -> None:
+    fake = run("gen")
+    assert cli.UNKNOWN_COMMAND in fake.text
+    assert clipboard.backend.written == []
+
+
+@pytest.mark.usefixtures("alice")
+def test_gen_at_the_password_prompt_fills_the_entry(
+    run: Run, clipboard: Clipboard, accounts: Accounts
+) -> None:
+    fake = unlocked(run, "add github", "alice", "", "", "copy github", secrets=["gen"])
+    assert (
+        "Generated a 20-character password. It is not shown; copy puts it on the clipboard.\n"
+    ) in fake.text
+    assert "Repeat the password: " not in fake.text
+    (password,) = clipboard.backend.written
+    assert len(password) == 20
+    assert password not in fake.text
+    assert accounts.login("alice", PASSWORD)._entries["github"].password == password
+
+
+@pytest.mark.usefixtures("alice")
+def test_gen_at_the_edit_password_prompt_replaces_the_password(
+    run: Run, clipboard: Clipboard, accounts: Accounts
+) -> None:
+    lines = ("edit github", "", "", "", "")
+    fake = unlocked(run, *ADD_GITHUB, *lines, secrets=[SECRET, SECRET, "gen"])
+    new = accounts.login("alice", PASSWORD)._entries["github"].password
+    assert new != SECRET
+    assert len(new) == 20
+    assert new not in fake.text
+    assert clipboard.backend.written == []  # filled in, not copied

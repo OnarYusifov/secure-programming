@@ -8,6 +8,8 @@
 - Every line printed goes through sanitize() (text.py), which removes control
   characters and terminal escape sequences. Text from a user or a file cannot
   move the cursor, clear the screen or retitle the window (T19).
+- Passwords are never printed (T25). A stored or generated password goes to
+  the clipboard, which is cleared after 20 seconds, on lock and on exit (T18).
 - An unexpected error becomes one generic message, never a traceback (T17).
   Ctrl-C cancels the command in progress; at the prompt, Ctrl-C and end of
   input exit cleanly.
@@ -19,12 +21,14 @@ unknown command is printed back, and command names cannot contain a dash.
 
 import contextlib
 import getpass
+import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from yunarpass import __version__, entries, policy
+from yunarpass import __version__, entries, policy, secrets_gen
+from yunarpass.clipboard import ClipboardError, ClipboardGuard, system_clipboard
 from yunarpass.entries import MASK, EntryError
 from yunarpass.policy import PolicyError
 from yunarpass.session import Session, VaultLockedError
@@ -61,7 +65,18 @@ class UsageError(Exception):
 
 # Errors whose messages are fixed strings written to be shown to the user.
 # Anything else is unexpected, and only the generic message is shown.
-_SAFE_ERRORS = (UsageError, StorageError, AccountError, PolicyError, EntryError, VaultLockedError)
+_SAFE_ERRORS = (
+    UsageError,
+    StorageError,
+    AccountError,
+    PolicyError,
+    EntryError,
+    VaultLockedError,
+    ClipboardError,
+)
+
+# Typed at an entry's password prompt, it fills in a generated password.
+GENERATE = "gen"
 
 
 class Command(NamedTuple):
@@ -73,9 +88,15 @@ class Command(NamedTuple):
 class Repl:
     """The read-eval-print loop."""
 
-    def __init__(self, accounts: Accounts, console: Console | None = None) -> None:
+    def __init__(
+        self,
+        accounts: Accounts,
+        console: Console | None = None,
+        clipboard: ClipboardGuard | None = None,
+    ) -> None:
         self.accounts = accounts
         self.console = Console() if console is None else console
+        self.clipboard = ClipboardGuard(system_clipboard()) if clipboard is None else clipboard
         self.session: Session | None = None
         self.running = False
 
@@ -98,8 +119,10 @@ class Repl:
             "add": Command(self.add, "Add a login entry", "<name>"),
             "list": Command(self.list_entries, "List the entries"),
             "show": Command(self.show, "Show an entry; the password stays masked", "<name>"),
+            "copy": Command(self.copy, "Copy an entry's password to the clipboard", "<name>"),
             "edit": Command(self.edit, "Change an entry", "<name>"),
             "rm": Command(self.rm, "Delete an entry", "<name>"),
+            "gen": Command(self.gen, "Copy a new random password to the clipboard", "[length]"),
             "help": Command(self.help, "Show this list"),
             "quit": Command(self.quit, "Lock the vault and exit"),
         }
@@ -129,7 +152,11 @@ class Repl:
         return 0
 
     def lock(self) -> None:
-        """Close the session, if there is one: the DEK is wiped (T13)."""
+        """Clear our copy from the clipboard (T18) and close the session: the DEK is wiped (T13)."""
+        try:
+            self.clipboard.clear()
+        except ClipboardError as error:
+            self.say(f"Error: {error}.")
         if self.session is not None:
             self.session.close()
             self.session = None
@@ -215,14 +242,21 @@ class Repl:
         # Each answer is checked as soon as it is typed, the name first.
         session.check_new_name(name)
         username = entries.check_username(self.ask("Username: "))
-        password = self._entry_password(self.console.read_secret("Password: "))
+        typed = self.console.read_secret(f"Password (or {GENERATE} to generate one): ")
+        password = self._entry_password(typed)
         url = entries.check_url(self.ask("URL: "))
         notes = entries.check_notes(self.ask("Notes: "))
         session.add(name, username=username, password=password, url=url, notes=notes)
         self.say(f"Added {name}.")
 
     def _entry_password(self, typed: str) -> str:
-        """Check a password typed for an entry, and ask for it again."""
+        """A generated password for "gen"; otherwise the typed one, checked and typed again."""
+        if typed == GENERATE:
+            self.say(
+                f"Generated a {secrets_gen.DEFAULT_LENGTH}-character password. It is not shown;"
+                " copy puts it on the clipboard."
+            )
+            return secrets_gen.generate_password()
         password = entries.check_password(typed)
         if self.console.read_secret("Repeat the password: ") != password:
             raise UsageError("the two passwords are different, so nothing was saved")
@@ -269,7 +303,9 @@ class Repl:
         elif entries.key(new_name) != entries.key(view.name):
             session.check_new_name(new_name)
         username = self._changed("Username", view.username, entries.check_username)
-        typed = self.console.read_secret("Password (Enter keeps the current one): ")
+        typed = self.console.read_secret(
+            f"Password (Enter keeps the current one, {GENERATE} generates a new one): "
+        )
         password = self._entry_password(typed) if typed else None
         url = self._changed("URL", view.url, entries.check_url)
         notes = self._changed("Notes", view.notes, entries.check_notes)
@@ -303,6 +339,24 @@ class Repl:
         session.remove(view.name)
         self.say(f"Deleted {view.name}.")
 
+    def copy(self, args: str) -> None:
+        session = self._unlocked()
+        name = session.view(_entry_name("copy", args)).name
+        session.copy_password(name, self.clipboard)
+        self.say(
+            f"Copied the password of {name}. "
+            f"The clipboard is cleared in {self.clipboard.seconds:g} seconds."
+        )
+
+    def gen(self, args: str) -> None:
+        self._unlocked()
+        length = _password_length(args)
+        self.clipboard.copy(secrets_gen.generate_password(length))
+        self.say(
+            f"Copied a new {length}-character password. "
+            f"The clipboard is cleared in {self.clipboard.seconds:g} seconds."
+        )
+
     def help(self, args: str) -> None:
         _no_arguments("help", args)
         usage = {
@@ -328,6 +382,21 @@ def _entry_name(command: str, args: str) -> str:
     if not args:
         raise UsageError(f"{command} needs the name of an entry: {command} <name>")
     return entries.check_name(args)
+
+
+_LENGTH = re.compile(r"[0-9]{1,3}")
+
+
+def _password_length(args: str) -> int:
+    """The optional argument of gen. A refused argument is not printed back."""
+    if not args:
+        return secrets_gen.DEFAULT_LENGTH
+    if _LENGTH.fullmatch(args) and (secrets_gen.MIN_LENGTH <= int(args) <= secrets_gen.MAX_LENGTH):
+        return int(args)
+    raise UsageError(
+        f"gen takes a length from {secrets_gen.MIN_LENGTH} to {secrets_gen.MAX_LENGTH}: "
+        "gen [length]"
+    )
 
 
 def _time(stamp: str) -> str:
