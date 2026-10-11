@@ -76,24 +76,43 @@ After unlocking (`yunarpass:<username>>` prompt):
 | `add <name>` | Add a login entry: prompts for username, password (masked; type `gen` to generate one), URL and notes |
 | `add-totp <name>` | Add a TOTP secret |
 | `add-ssh <name> <path>` | Import an SSH private key file into the vault |
-| `list` | List entry names and types, never secrets |
-| `show <name>` | Show an entry; the password is always masked |
-| `copy <name>` | Copy the password to the clipboard; cleared after 20 s, and kept out of the clipboard history on Windows |
+| `list` | List the entries: ID, name, type and username, never a password |
+| `show <name or ID>` | Show an entry; the password is always masked |
+| `copy <name or ID>` | Copy the password to the clipboard; cleared after 20 s, and kept out of the clipboard history on Windows |
 | `totp <name>` | Show the current TOTP code |
 | `ssh-load <name>` | Load the key into `ssh-agent` for 10 minutes |
-| `edit <name>` | Edit an entry: Enter keeps a value, `-` clears it; the password prompt is masked and also accepts `gen` |
-| `rm <name>` | Delete an entry, after its name is typed again |
+| `edit <name or ID>` | Edit an entry: Enter keeps a value, `-` clears it; the password prompt is masked and also accepts `gen` |
+| `rm <name or ID>` | Delete an entry, after showing it and asking you to type `yes` |
 | `gen [length]` | Generate a password (20 characters by default, 12 to 128) with letters, digits and symbols, and copy it to the clipboard; it is never printed |
 | `passwd` | Change the master password |
 | `lock` | Lock the vault and clear the clipboard; also happens automatically after 5 minutes idle |
 | `quit` | Lock and exit |
 
 Entry names have 1 to 64 characters: letters, digits, `.`, `_`, `@` and `-`, starting with a letter
-or a digit. No two entries can have the same name, ignoring case, and `show GitHub` finds the entry
-`github`. A username can have up to 256 characters, a password 1024, a URL 2048 and the notes 4096;
+or a digit. Two entries may have the same name, such as a personal and a work `github`, and names
+are compared without regard to case. A username can have up to 256 characters, a password 1024, a URL 2048 and the notes 4096;
 control characters and terminal escape sequences are refused in all of them. `add` checks each
 answer as soon as it is typed and asks for the password twice. `show` prints every field except the
 password, which always appears as `********`, whatever its length.
+
+Every entry also has an ID, which `list` and `show` print, like `3f9c0d`: the first 6 characters of
+a random 128-bit number, or a few more if another entry's ID starts the same way. `show`, `copy`,
+`edit` and `rm` take a name or an ID. If several entries have the name you typed, `edit` and `rm`
+change nothing; they list those entries with their IDs, and you repeat the command with the ID you
+mean. `show` and `copy` ask which one you mean instead (Enter cancels). `rm` always shows the entry
+first and deletes it only after you type `yes`.
+
+```
+yunarpass:alice> list
+2 entries:
+  3f9c0d  github  login  alice@personal.com
+  a71e42  github  login  alice@work.com
+yunarpass:alice> rm github
+2 entries are named github:
+  3f9c0d  github  login  alice@personal.com
+  a71e42  github  login  alice@work.com
+To change or delete one of them, use its ID, for example: rm 3f9c0d
+```
 
 `copy` and `gen` put a password on the clipboard and say so; the password itself is never shown.
 After 20 seconds yunarpass clears the clipboard, but only if it still holds that password, so
