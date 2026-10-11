@@ -125,8 +125,8 @@ To change or delete one of them, use its ID, for example: rm 3f9c0d
 
 `copy` and `gen` put a password on the clipboard and say so; the password itself is never shown.
 After 20 seconds yunarpass clears the clipboard, but only if it still holds that password, so
-anything you copied in the meantime stays. Leaving the prompt (`quit`, Ctrl-C, the end of input)
-clears it too. On Windows the copy is marked so that it stays out of the clipboard history (Win+V)
+anything you copied in the meantime stays. Locking the vault and leaving the prompt (`quit`,
+Ctrl-C, the end of input) clear it too. On Windows the copy is marked so that it stays out of the clipboard history (Win+V)
 and the cloud clipboard. Typing `gen` at the password prompt of `add` or `edit` fills in a new
 20-character password without showing it; `copy` then gets it. `gen` takes a length from 12 to 128.
 
@@ -140,6 +140,14 @@ the same rules as at registration, and a wrong current password waits like a fai
 the copy of the vault's data key that the password protects is encrypted again, under a key
 derived from the new password and a new salt: the entries are not touched, and the recovery key
 keeps working.
+
+`lock` locks the vault and goes back to the login prompt: the vault's key is wiped from memory,
+the entries are dropped, and a password yunarpass put on the clipboard is cleared if it is still
+there. The same happens by itself after 5 minutes without input, even in the middle of a command.
+Nothing is printed at that moment, because the prompt is waiting for you; the next line you type
+is not run, and yunarpass tells you that the vault was locked instead. The idle time keeps
+counting while the computer sleeps, so a laptop that went to sleep with the vault unlocked finds
+it locked when it wakes up. The 5 minutes are a fixed limit in the program.
 
 Checkpoint 2 delivers `register`, `login`, `recover`, the login entries (`add`, `list`, `show`,
 `edit`, `rm`), `copy`, `gen`, `passwd`, `lock` and auto-lock. Checkpoint 3 adds TOTP, SSH keys and a
