@@ -401,19 +401,40 @@ def test_each_encryption_has_its_own_associated_data() -> None:
 def test_rewrapping_the_password_copy_leaves_the_rest_valid(
     vault: VaultFile, dek: bytearray
 ) -> None:
-    # What a password change does (D10): new salt, new KEK, new password copy.
-    # The recovery copy and the body are not touched and must still work.
-    header = dataclasses.replace(vault.header, kdf=KdfParams.new())
-    kek = crypto.derive_kek("a brand new password", header.kdf)
-    changed = dataclasses.replace(
-        vault, header=header, password_dek=crypto.wrap_dek(kek, dek, header.password_aad())
-    )
+    # A password change (UC7, D10): new salt, new KEK, new password copy. The
+    # recovery copy and the body are not touched and must still work.
+    changed = vaultfile.rewrap_password(vault, dek, "a brand new password")
     changed = vaultfile.parse(vaultfile.serialize(changed))
     assert vaultfile.unlock_with_password(changed, "a brand new password") == dek
     with pytest.raises(CryptoError):
         vaultfile.unlock_with_password(changed, PASSWORD)
     assert vaultfile.unlock_with_recovery_key(changed, RECOVERY_KEY) == dek
     assert vaultfile.open_body(changed, dek) == Body(7, ENTRIES)
+
+
+def test_rewrapping_changes_only_the_salt_and_the_password_copy(
+    vault: VaultFile, dek: bytearray
+) -> None:
+    before, after = as_doc(vault), as_doc(vaultfile.rewrap_password(vault, dek, PASSWORD))
+    assert after["kdf"]["salt"] != before["kdf"]["salt"]
+    assert after["wrapped_dek"]["password"] != before["wrapped_dek"]["password"]
+    for doc in (before, after):
+        del doc["kdf"]["salt"], doc["wrapped_dek"]["password"]
+    assert after == before  # the KDF parameters, the recovery copy and the body
+
+
+def test_rewrapping_keeps_stronger_kdf_parameters() -> None:
+    vault, dek = vaultfile.create("alice", PASSWORD, RECOVERY_KEY, Body())
+    stronger = KdfParams(131072, 4, 4, vault.header.kdf.salt)
+    header = dataclasses.replace(vault.header, kdf=stronger)
+    kek = crypto.derive_kek(PASSWORD, stronger)
+    vault = VaultFile(
+        header, crypto.wrap_dek(kek, dek, header.password_aad()), vault.recovery_dek, vault.body
+    )
+    changed = vaultfile.rewrap_password(vault, dek, "a brand new password")
+    kdf = changed.header.kdf
+    assert (kdf.memory_kib, kdf.iterations, kdf.lanes) == (131072, 4, 4)
+    assert vaultfile.unlock_with_password(changed, "a brand new password") == dek
 
 
 # --- The body (T9) -------------------------------------------------------------------------

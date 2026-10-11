@@ -1,8 +1,12 @@
-"""Tests for accounts: users.json and registration (threats T1, T5, T11, T12)."""
+"""Tests for accounts: users.json, registration, login and password change.
+
+Threats T1, T2, T4, T5, T7, T8, T11, T12.
+"""
 
 import base64
 import json
 import os
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -10,10 +14,11 @@ from typing import Any
 import pytest
 
 from yunarpass import crypto, entries, fsperm, secrets_gen, storage, users, vaultfile
-from yunarpass.crypto import KdfParams
+from yunarpass.crypto import CryptoError, KdfParams
 from yunarpass.policy import PolicyError
+from yunarpass.session import Session, VaultChangedError, VaultLockedError
 from yunarpass.storage import USERS_FILE, DataDir, StorageError
-from yunarpass.users import AccountError, Accounts, Backoff, LoginError
+from yunarpass.users import AccountError, Accounts, Backoff, LoginError, WrongPasswordError
 from yunarpass.vaultfile import Body, VaultFile, VaultFormatError
 
 PASSWORD = "correct horse battery staple"
@@ -542,3 +547,128 @@ def test_a_damaged_index_stops_login_with_its_own_message(accounts: Accounts) ->
     accounts.data_dir.write(USERS_FILE, b"[]")
     with pytest.raises(StorageError, match="damaged"):
         accounts.login("alice", PASSWORD)
+
+
+# --- Changing the master password (UC7) ----------------------------------------------
+
+NEW_PASSWORD = "a brand new passphrase"
+
+
+@pytest.fixture
+def alice(accounts: Accounts) -> Session:
+    """Alice's unlocked session."""
+    accounts.register("alice", PASSWORD)
+    return accounts.login("alice", PASSWORD)
+
+
+def test_after_a_change_the_old_password_fails_and_the_new_one_works(
+    accounts: Accounts, alice: Session
+) -> None:
+    alice.add("github", username="", password="s3cret-Password!", url="", notes="")
+    accounts.change_password(alice, PASSWORD, NEW_PASSWORD)
+    alice.close()
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+    again = accounts.login("alice", NEW_PASSWORD)
+    assert again.counter == 1  # the body was not saved again
+    assert [summary.name for summary in again.summaries()] == ["github"]
+
+
+def test_the_recovery_key_still_works_after_a_change(accounts: Accounts) -> None:
+    recovery_key = accounts.register("alice", PASSWORD)
+    accounts.change_password(accounts.login("alice", PASSWORD), PASSWORD, NEW_PASSWORD)
+    vault = vault_of(accounts, "alice")
+    key = secrets_gen.parse_recovery_key(recovery_key)
+    dek = vaultfile.unlock_with_recovery_key(vault, key)
+    assert vaultfile.open_body(vault, dek) == Body()
+
+
+def test_a_change_rewraps_only_the_password_copy(
+    accounts: Accounts, alice: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = vault_doc(accounts, "alice")
+    calls: list[object] = []
+    log_kdf_calls(monkeypatch, calls)
+    accounts.change_password(alice, PASSWORD, NEW_PASSWORD)
+    assert calls == ["kdf", "kdf"]  # the current password checked, the new one derived
+    after = vault_doc(accounts, "alice")
+    assert after["kdf"]["salt"] != before["kdf"]["salt"]
+    for doc in (before, after):
+        del doc["kdf"]["salt"], doc["wrapped_dek"]["password"]
+    assert after == before  # identity, KDF parameters, recovery copy and body
+
+
+def test_a_wrong_current_password_is_refused_with_the_login_delay(
+    accounts: Accounts, alice: Session, clock: FakeClock
+) -> None:
+    before = contents(accounts)
+    for _ in range(3):
+        with pytest.raises(WrongPasswordError) as caught:
+            accounts.change_password(alice, "a wrong password", NEW_PASSWORD)
+        assert str(caught.value) == "the current master password is wrong, so it was not changed"
+    assert clock.log == [1, 2, 4]
+    assert contents(accounts) == before
+    accounts.change_password(alice, PASSWORD, NEW_PASSWORD)
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+    assert clock.log == [1, 2, 4, 1]  # the success reset the delay
+
+
+def test_the_delay_is_shared_with_login(
+    accounts: Accounts, alice: Session, clock: FakeClock
+) -> None:
+    with pytest.raises(WrongPasswordError):
+        accounts.change_password(alice, "a wrong password", NEW_PASSWORD)
+    with pytest.raises(LoginError):
+        accounts.login("alice", "another wrong password")
+    assert clock.log == [1, 2]
+
+
+@pytest.mark.parametrize("new", ["too short", "unbelievable", "x" * 1025])
+def test_a_new_password_against_the_policy_is_refused_before_any_work(
+    accounts: Accounts,
+    alice: Session,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    new: str,
+) -> None:
+    before = contents(accounts)
+    calls: list[object] = []
+    log_kdf_calls(monkeypatch, calls)
+    with pytest.raises(PolicyError):
+        accounts.change_password(alice, "a wrong password", new)
+    assert calls == []
+    assert clock.log == []  # a policy error costs no delay
+    assert contents(accounts) == before
+
+
+def test_a_changed_password_is_normalized_like_a_new_one(
+    accounts: Accounts, alice: Session
+) -> None:
+    composed = "pässwörd mit ümlaut"
+    accounts.change_password(alice, PASSWORD, composed)
+    accounts.login("alice", unicodedata.normalize("NFD", composed))
+
+
+def test_a_change_on_a_locked_session_is_refused(accounts: Accounts, alice: Session) -> None:
+    alice.close()
+    with pytest.raises(VaultLockedError):
+        accounts.change_password(alice, PASSWORD, NEW_PASSWORD)
+    accounts.login("alice", PASSWORD)
+
+
+def test_a_change_is_refused_if_another_session_saved_first(
+    accounts: Accounts, alice: Session
+) -> None:
+    other = accounts.login("alice", PASSWORD)
+    other.add("github", username="", password="s3cret-Password!", url="", notes="")
+    with pytest.raises(VaultChangedError):
+        accounts.change_password(alice, PASSWORD, NEW_PASSWORD)
+    assert accounts.login("alice", PASSWORD).counter == 1  # still the old password
+
+
+def test_the_session_alone_also_needs_the_current_password(alice: Session) -> None:
+    with pytest.raises(CryptoError):
+        alice.change_password("a wrong password", NEW_PASSWORD)
+    with pytest.raises(PolicyError):
+        alice.change_password(PASSWORD, "too short")

@@ -15,6 +15,7 @@ recovery copy and the body stay valid (DESIGN.md §6, D10).
 """
 
 import base64
+import dataclasses
 import json
 import re
 import secrets
@@ -379,6 +380,20 @@ def unlock_with_password(vault: VaultFile, password: str) -> bytearray:
     """
     kek = crypto.derive_kek(password, vault.header.kdf)
     return _unwrap(kek, vault.password_dek, vault.header.password_aad())
+
+
+def rewrap_password(vault: VaultFile, dek: Key, password: str) -> VaultFile:
+    """The vault with the DEK wrapped under a new master password (UC7).
+
+    The password copy gets a fresh salt, so a new KEK, and keeps the Argon2id
+    parameters, which may be stronger than the floor. The body and the
+    recovery copy stay exactly as they are: neither binds the password's KDF
+    inputs (D10), so both remain valid.
+    """
+    kdf = dataclasses.replace(vault.header.kdf, salt=secrets.token_bytes(crypto.SALT_BYTES))
+    header = dataclasses.replace(vault.header, kdf=kdf)
+    password_dek = _wrap(crypto.derive_kek(password, kdf), dek, header.password_aad())
+    return VaultFile(header, password_dek, vault.recovery_dek, vault.body)
 
 
 def unlock_with_recovery_key(vault: VaultFile, recovery_key: bytes) -> bytearray:
