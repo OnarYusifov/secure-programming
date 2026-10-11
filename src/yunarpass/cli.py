@@ -5,9 +5,9 @@
 - Secrets are read only at masked prompts. No command takes a secret as an
   argument, and the program takes no arguments at all, so a secret cannot end
   up in the shell history or the process list (T3, T16).
-- Every line printed goes through sanitize(), which removes control characters
-  and terminal escape sequences. Text from a user or a file cannot move the
-  cursor, clear the screen or retitle the window (T19).
+- Every line printed goes through sanitize() (text.py), which removes control
+  characters and terminal escape sequences. Text from a user or a file cannot
+  move the cursor, clear the screen or retitle the window (T19).
 - An unexpected error becomes one generic message, never a traceback (T17).
   Ctrl-C cancels the command in progress; at the prompt, Ctrl-C and end of
   input exit cleanly.
@@ -19,9 +19,7 @@ unknown command is printed back, and command names cannot contain a dash.
 
 import contextlib
 import getpass
-import re
 import sys
-import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -30,6 +28,7 @@ from yunarpass import __version__, policy
 from yunarpass.policy import PolicyError
 from yunarpass.session import Session
 from yunarpass.storage import DataDir, StorageError
+from yunarpass.text import sanitize
 from yunarpass.users import AccountError, Accounts, LoginError
 
 MAX_LINE = 256  # characters in one command line
@@ -38,37 +37,6 @@ PROMPT = "yunarpass> "
 LOGIN_FAILED = "Login failed."
 GENERIC_ERROR = "Something went wrong and the command did not complete."
 UNKNOWN_COMMAND = "Unknown command. Type help to see the commands."
-
-# Terminal escape sequences (ECMA-48), removed whole: CSI (colours, cursor
-# movement, erasing the screen), the string commands OSC, DCS, SOS, PM and APC
-# (window title, hyperlinks), and every other escape.
-_ESCAPE_SEQUENCE = re.compile(
-    r"\x1b\[[0-?]*[ -/]*[@-~]"
-    r"|\x1b[\]PX^_][^\x07\x1b]*(?:\x07|\x1b\\)?"
-    r"|\x1b[ -/]*[0-~]"
-)
-# Control characters (C0, DEL, C1) and the line and paragraph separators.
-_UNSAFE_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
-# Bidirectional controls change the order in which text is displayed, so a
-# name could look like something else on screen ("Trojan Source").
-_BIDI_CONTROLS = frozenset(
-    map(chr, [0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)])
-)
-
-
-def sanitize(text: str) -> str:
-    """Return text that is safe to print on a terminal.
-
-    Escape sequences are removed whole, then every remaining control character
-    (including ESC, CR, LF, TAB and DEL), the Unicode line and paragraph
-    separators and the bidirectional controls.
-    """
-    text = _ESCAPE_SEQUENCE.sub("", text)
-    return "".join(
-        char
-        for char in text
-        if unicodedata.category(char) not in _UNSAFE_CATEGORIES and char not in _BIDI_CONTROLS
-    )
 
 
 def _write_stdout(text: str) -> None:
