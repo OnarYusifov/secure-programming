@@ -7,18 +7,22 @@ In the decrypted body an entry is a JSON object with exactly these fields:
      "created": "2026-10-11T15:02:00Z", "modified": "2026-10-11T15:02:00Z"}
 
 Every field is checked against an allow-list or a limit when an entry is built
-or edited, and again when a vault is opened (T19). The name is the only field
-used to find an entry, so it is restricted to a small ASCII alphabet. The other
-text fields may hold any character except those that sanitize() would remove
-from the output (text.is_unsafe); notes may also have line breaks.
+or edited, and again when a vault is opened (T19). The name and the ID are what
+a user types to find an entry, so the name is restricted to a small ASCII
+alphabet. Names may repeat; IDs are 128 random bits and unique in a vault. A
+user sees and types the short form of an ID (short_ids). The other text fields
+may hold any character except those that sanitize() would remove from the
+output (text.is_unsafe); notes may also have line breaks.
 
 The password is in LoginEntry only. The views handed to a user interface,
 EntryView and EntrySummary, have no password field at all, so no interface can
 show what it never receives (T25).
 """
 
+import os
 import re
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import NamedTuple
@@ -46,8 +50,13 @@ MAX_NOTES = 4096
 # the password's length.
 MASK = "********"
 
-_ID = re.compile(r"[0-9a-f]{32}")
+ID = re.compile(r"[0-9a-f]{32}")
 _ID_BYTES = 16
+# A short ID has at least this many hex characters (24 bits), more only when
+# two IDs in the vault start the same way.
+SHORT_ID_LENGTH = 6
+# What a user may type as an ID: its first 6 to 32 hex characters, in any case.
+ID_PREFIX = re.compile(r"[0-9A-Fa-f]{6,32}")
 _TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _FIELDS = frozenset(
@@ -115,17 +124,39 @@ def key(name: str) -> str:
     return name.lower()
 
 
-class EntrySummary(NamedTuple):
-    """What `list` shows: the name and the type."""
+def short_ids(ids: Iterable[str]) -> dict[str, str]:
+    """Each ID's short form, like a git short hash.
 
+    That is its first SHORT_ID_LENGTH characters, or more if another of these
+    IDs starts the same way: just enough to tell it from all the others.
+    """
+    ordered = sorted(set(ids))
+    result = {}
+    for index, entry_id in enumerate(ordered):
+        # In sorted order, the ID sharing the longest start with this one is
+        # one of its two neighbours.
+        neighbours = ordered[max(index - 1, 0) : index] + ordered[index + 1 : index + 2]
+        shared = max((len(os.path.commonprefix([entry_id, n])) for n in neighbours), default=0)
+        result[entry_id] = entry_id[: max(SHORT_ID_LENGTH, shared + 1)]
+    return result
+
+
+class EntrySummary(NamedTuple):
+    """What `list` shows: the ID, the name, the type and the username."""
+
+    id: str  # the full ID, which the session's methods take
+    short_id: str  # what a user sees and types
     name: str
     type: str
+    username: str
 
 
 @dataclass(frozen=True, slots=True)
 class EntryView:
     """What `show` shows: every field except the password."""
 
+    id: str
+    short_id: str
     name: str
     type: str
     username: str
@@ -150,7 +181,7 @@ class LoginEntry:
     modified: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, str) or not _ID.fullmatch(self.id):
+        if not isinstance(self.id, str) or not ID.fullmatch(self.id):
             raise EntryError("the entry ID is not allowed")
         check_name(self.name)
         check_username(self.username)
@@ -164,12 +195,20 @@ class LoginEntry:
     def type(self) -> str:
         return LOGIN
 
-    def summary(self) -> EntrySummary:
-        return EntrySummary(self.name, self.type)
+    def summary(self, short_id: str) -> EntrySummary:
+        return EntrySummary(self.id, short_id, self.name, self.type, self.username)
 
-    def view(self) -> EntryView:
+    def view(self, short_id: str) -> EntryView:
         return EntryView(
-            self.name, self.type, self.username, self.url, self.notes, self.created, self.modified
+            self.id,
+            short_id,
+            self.name,
+            self.type,
+            self.username,
+            self.url,
+            self.notes,
+            self.created,
+            self.modified,
         )
 
     def to_json(self) -> dict[str, object]:

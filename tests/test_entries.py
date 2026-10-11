@@ -135,10 +135,48 @@ def test_timestamps_are_utc() -> None:
 
 def test_views_have_no_password() -> None:
     entry = github()
-    view = entry.view()
+    view = entry.view("3f9c0d")
     assert "password" not in {f.name for f in dataclasses.fields(view)}
     assert entry.password not in repr(view)
-    assert entry.summary() == ("github", "login")
+    summary = entry.summary("3f9c0d")
+    assert summary == (entry.id, "3f9c0d", "github", "login", "alice@example.com")
+    assert "password" not in summary._fields
+    assert (view.id, view.short_id, view.username) == (entry.id, "3f9c0d", "alice@example.com")
+
+
+# --- Short IDs -----------------------------------------------------------------------
+
+
+def ids(*starts: str) -> list[str]:
+    """Full IDs that begin with the given hex digits."""
+    return [start.ljust(32, "0") for start in starts]
+
+
+def test_a_short_id_is_the_first_six_characters() -> None:
+    first, second = ids("3f9c0d2e", "a71e4209")
+    assert entries.short_ids([first, second]) == {first: "3f9c0d", second: "a71e42"}
+    assert entries.short_ids([first]) == {first: "3f9c0d"}
+    assert entries.short_ids([]) == {}
+
+
+def test_ids_that_start_alike_get_just_enough_characters() -> None:
+    a, b, c, d = ids("3f9c0d1", "3f9c0d2", "3f9c0e", "3f9c0d1a")
+    assert entries.short_ids([a, b, c]) == {a: "3f9c0d1", b: "3f9c0d2", c: "3f9c0e"}
+    shorts = entries.short_ids([a, b, c, d])
+    assert (shorts[a], shorts[d]) == (a[:8], d[:8])  # 3f9c0d10 and 3f9c0d1a
+    assert shorts[b] == "3f9c0d2"
+
+
+def test_short_ids_are_unique_and_prefixes_for_many_random_ids() -> None:
+    many = [github().id for _ in range(500)]
+    shorts = entries.short_ids(many)
+    assert len(set(shorts.values())) == 500
+    for entry_id, short in shorts.items():
+        assert entry_id.startswith(short)
+        assert len(short) >= entries.SHORT_ID_LENGTH
+        assert [i for i in many if i.startswith(short)] == [entry_id]
+        if len(short) > entries.SHORT_ID_LENGTH:  # never longer than needed
+            assert len([i for i in many if i.startswith(short[:-1])]) > 1
 
 
 def test_the_repr_of_an_entry_hides_the_password() -> None:
