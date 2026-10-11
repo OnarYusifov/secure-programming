@@ -174,7 +174,7 @@ flowchart LR
 
 | ID | Misuse case (misuser) | Threatens | Risk | Mitigation | Residual risk |
 |---|---|---|---|---|---|
-| T1 | Brute-force the master password offline against a copied vault file (M1) | UC2 | High | Memory-hard KDF (Argon2id) with a per-user random salt; at least 12 characters and not in a blocklist of the 10 000 most common passwords, checked at UC1/UC7 | A weak but allowed password can still be guessed eventually |
+| T1 | Brute-force the master password offline against a copied vault file (M1) | UC2 | High | Memory-hard KDF (Argon2id) with a per-user random salt; at least 12 characters and not in a blocklist of the 10 000 most common passwords (ignoring case), checked at UC1/UC7 | A weak but allowed password can still be guessed eventually |
 | T2 | Guess passwords online at the login prompt (M2) | UC2 | Medium | The KDF makes every attempt slow; a delay of 1 s after the first failure, doubling after each further one. The delay values are constants in the code; configuration can only make them stricter | The offline attack (T1) skips our program entirely, so only the KDF cost applies there |
 | T3 | Read the password as it is typed (M4) | UC2 | Low | Masked input, never echoed. An unknown command is not printed back either, in case it was a password typed at the wrong prompt | Physical observation of the keyboard |
 | T4 | Learn which usernames exist from error messages or timing (M2) | UC2 | Low | One generic login error; the KDF also runs for unknown usernames | None significant |
@@ -305,15 +305,29 @@ gives the same bytes. For the body:
 The password copy adds `"kdf":{"alg":"argon2id","m_kib":65536,"p":4,"salt":"…","t":3}` with
 `"aad":"password-wrap"`, and the recovery copy adds `"salt":"…"` with `"aad":"recovery-wrap"`.
 
-`users.json` holds only `username` → `vault_id` and contains no secrets. Vault file names are
-random IDs, never usernames (T11). Registration refuses an existing username, and `users.json` is
-written atomically in the same way as the vault, so two registrations cannot corrupt it.
+`users.json` holds only `username` → `vault_id` and contains no secrets:
+
+```json
+{"format": 1, "users": {"alice": "3f9c0d2e8a7b4c61a2e5f0b9d8c7a6e1"}}
+```
+
+It is parsed with the same strict JSON rules as a vault file: exactly these two fields, format 1,
+every username on the allow-list, every vault ID 32 lowercase hex digits, and no vault ID used
+twice. A damaged `users.json` stops registration with a message that names the file; it
+is never repaired or overwritten. Vault file names are random IDs, never usernames (T11).
+
+Registration (UC1) checks the username before asking for the password, then the password policy,
+then creates the vault: a new DEK, a fresh Argon2id salt for the password copy and a fresh HKDF
+salt for the recovery copy, a random 128-bit vault ID and an empty body with counter 0. The vault
+file is written first and `users.json` second, both atomically, so a crash in between leaves an
+unused vault file but never an account without a vault. `users.json` is read again just before it
+is written, so a name that another registration took in the meantime is refused.
 
 ### Limits (constants in the code; configuration may only tighten them)
 
 | Limit | Default |
 |---|---|
-| Master password | at least 12 characters, not in the 10 000-most-common blocklist |
+| Master password | 12 to 1024 characters (counted after NFC normalization), not in the 10 000-most-common blocklist (ignoring case) |
 | Argon2id floor | 64 MiB, 3 iterations, 4 lanes |
 | Argon2id ceiling | 1 GiB, 64 iterations, 16 lanes |
 | Login delay | 1 s after the first failure, doubling |
@@ -339,6 +353,7 @@ immutable and may be copied. This is handled as partial mitigation plus accepted
 | `pbcopy` / `wl-copy` / `xclip` (system tools, macOS and Linux) | Clipboard copy and clearing outside Windows | Already on the system, so no Python dependency; called by absolute path with an argument list, never through a shell |
 | `textual` (CP3) | Full-screen TUI | Modern terminal UI on top of the same core |
 | Standard library: `secrets`, `getpass`, `json`, `os`, `pathlib` | CSPRNG, masked input, parsing, file I/O | No extra dependencies |
+| SecLists `10k-most-common.txt` (data file, MIT License) | The common-password blocklist of the master-password policy (T1) | Shipped unchanged inside the package, so the check works offline and sends nothing anywhere. `data/common-passwords.LICENSE` names the source commit and carries the licence |
 
 Development and CI: `pytest` with `pytest-cov` (branch coverage, at least 80% over the Windows and
 Linux runs combined, since each OS runs code the other cannot), `ruff`, `mypy`,
@@ -381,18 +396,18 @@ and prove it. The pull request that implements a mitigation fills in its code an
 
 | Threat | Mitigation in short | Issue | Code | Tests |
 |---|---|---|---|---|
-| T1 offline brute force | Argon2id with a parameter floor; master-password policy | #16, #22, #26 | `crypto.py`: `KdfParams`, `derive_kek` | `test_crypto.py`: `test_argon2id_matches_rfc9106_vector`, `test_derive_kek_known_answer`, `test_kdf_params_new_uses_the_floor_and_a_fresh_salt` |
+| T1 offline brute force | Argon2id with a parameter floor; master-password policy | #16, #22, #26 | `crypto.py`: `KdfParams`, `derive_kek`; `policy.py`: `check_master_password` (12 to 1024 characters after NFC), `is_common` (the 10 000-most-common list, ignoring case), called by `users.py`: `Accounts.register` | `test_crypto.py`: `test_argon2id_matches_rfc9106_vector`, `test_derive_kek_known_answer`, `test_kdf_params_new_uses_the_floor_and_a_fresh_salt`; `test_policy.py`: `test_refused_passwords_name_the_rule`, `test_the_common_list_is_complete_and_ignores_case`; `test_users.py`: `test_a_password_against_the_policy_is_refused_and_nothing_is_written` |
 | T2 online guessing | KDF cost per attempt; delay doubling after each failure | #23 | — | — |
-| T3 password seen while typed | Masked input; unknown commands not echoed | #21 | `cli.py`: `Console.read_secret` (`getpass`, echo off), `Repl.execute` (unknown command not printed back) | `test_cli.py`: `test_the_default_console_reads_secrets_with_getpass`, `test_an_unknown_command_is_refused_and_not_echoed` |
+| T3 password seen while typed | Masked input; unknown commands not echoed | #21, #22 | `cli.py`: `Console.read_secret` (`getpass`, echo off), `Repl.execute` (unknown command not printed back) | `test_cli.py`: `test_the_default_console_reads_secrets_with_getpass`, `test_an_unknown_command_is_refused_and_not_echoed`; `test_cli.py`: `test_register_reads_passwords_only_at_masked_prompts` |
 | T4 username enumeration | One generic error; the KDF also runs for unknown usernames | #23 | — | — |
-| T5 recovery key stolen | 160-bit key shown once; using it forces a new password and key | #17, #22, #27 | `crypto.py`: `derive_recovery_kek`; `secrets_gen.py`: `new_recovery_key`, `format_recovery_key`, `parse_recovery_key` | `test_crypto.py`: `test_hkdf_matches_rfc5869_vector`, `test_recovery_kek_known_answer`; `test_secrets_gen.py`: `test_parse_refuses_malformed_input`, `test_format_parse_round_trip` |
+| T5 recovery key stolen | 160-bit key shown once; using it forces a new password and key | #17, #22, #27 | `crypto.py`: `derive_recovery_kek`; `secrets_gen.py`: `new_recovery_key`, `format_recovery_key`, `parse_recovery_key`; `users.py`: `Accounts.register` returns the key and stores only the KEK-wrapped DEK; `cli.py`: `Repl.register` shows it once | `test_crypto.py`: `test_hkdf_matches_rfc5869_vector`, `test_recovery_kek_known_answer`; `test_secrets_gen.py`: `test_parse_refuses_malformed_input`, `test_format_parse_round_trip`; `test_users.py`: `test_the_recovery_key_is_not_stored_anywhere`; `test_cli.py`: `test_register_creates_the_account_and_shows_the_recovery_key_once` |
 | T6 vault read from disk | AES-256-GCM over the whole body; no plaintext on disk | #16, #20 | `crypto.py`: `encrypt`, `decrypt`; `vaultfile.py`: `seal_body`, `open_body` | `test_crypto.py`: `test_encrypt_decrypt_round_trip`, `test_decrypt_with_wrong_key_fails`, `test_nonces_are_unique`; `test_vaultfile.py`: `test_no_entry_text_appears_in_the_file`, `test_every_seal_uses_a_fresh_nonce` |
 | T7 header tampering | KDF inputs authenticated as AAD of their own copy of the DEK; KDF floor and ceiling enforced on load | #16, #20 | `crypto.py`: `KdfParams.check`, AAD in `encrypt`/`decrypt`/`unwrap_dek`; `vaultfile.py`: `parse` (floor and ceiling), `Header.password_aad`, `Header.recovery_aad` | `test_crypto.py`: `test_kdf_params_outside_limits_are_refused`, `test_derive_kek_rechecks_params`, `test_changed_associated_data_fails`, `test_flipped_ciphertext_bit_fails`; `test_vaultfile.py`: `test_weakened_kdf_parameters_are_refused_before_the_kdf_runs`, `test_stronger_kdf_parameters_still_break_the_password_copy`, `test_a_changed_salt_breaks_only_its_own_copy` |
 | T8 vaults swapped between users | Username and vault ID bound into every AAD | #16, #20, #23 | `crypto.py`: AAD is required and non-empty; `vaultfile.py`: `Header.body_aad`, `password_aad`, `recovery_aad` | `test_crypto.py`: `test_changed_associated_data_fails` (other username), `test_empty_associated_data_is_refused`; `test_vaultfile.py`: `test_a_changed_identity_breaks_every_encryption`, `test_parts_of_another_vault_do_not_fit`, `test_associated_data_known_answer` |
 | T9 rollback | Counter inside the encrypted body, shown after unlock | #20, #23 | `vaultfile.py`: `Body.counter`, `parse_body` | `test_vaultfile.py`: `test_body_round_trip`, `test_malformed_bodies_are_refused` |
-| T10 crash during save | Atomic write with a backup copy | #19 | `storage.py`: `DataDir.write`, `_replace`, `_rename_over` | `test_storage.py`: `test_a_crash_at_any_step_leaves_a_complete_file`, `test_an_interrupted_write_cleans_up_and_keeps_the_old_file`, `test_the_backup_holds_the_previous_version` |
-| T11 path traversal, symlinks, hard links | Random file names, allow-lists, links and foreign-owned files refused | #18, #19, #22 | `fsperm.py`: `create_private_file` (`O_EXCL` / `CREATE_NEW`), `check_private_dir` (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`); `storage.py`: `_FILE_NAME` allow-list, `data_dir_path`, `_read_private` (lstat, open, fstat, compare) | `test_fsperm.py`: `test_posix_create_does_not_follow_a_symlink`, `test_posix_symlink_in_place_of_the_directory_is_refused`, `test_windows_junction_in_place_of_the_directory_is_refused`, `test_windows_symlink_in_place_of_the_directory_is_refused`, `test_a_file_in_place_of_the_directory_is_refused`; `test_storage.py`: `test_names_off_the_allow_list_are_refused`, `test_yunarpass_home_must_be_absolute_without_dotdot`, `test_a_symlink_is_refused`, `test_a_hard_link_is_refused`, `test_a_file_swapped_between_the_check_and_the_open_is_refused` |
-| T12 other OS users read files | Owner-only permissions set at creation; checked again on use | #18, #19 | `fsperm.py`: `make_private_dir`, `create_private_file`, `check_private_dir`, `check_private_fd`, `ensure_data_dir`; `storage.py`: `DataDir.open`, `_read_private` | `test_fsperm.py`: `test_posix_new_directory_is_0700`, `test_posix_new_file_is_0600`, `test_windows_acl_is_protected_with_one_entry_for_the_user`, `test_posix_loosened_directory_is_refused`, `test_posix_loosened_file_is_refused`, `test_windows_directory_with_an_entry_for_everyone_is_refused`, `test_windows_directory_with_inherited_entries_is_refused`, `test_windows_null_dacl_is_refused`, `test_*_owned_by_another_user_is_refused`; `test_storage.py`: `test_a_file_open_to_other_users_is_refused`, `test_open_refuses_a_directory_open_to_other_users`, `test_a_written_file_is_private` |
+| T10 crash during save | Atomic write with a backup copy | #19, #22 | `storage.py`: `DataDir.write`, `_replace`, `_rename_over`; `users.py`: `Accounts.register` writes the vault before `users.json` | `test_storage.py`: `test_a_crash_at_any_step_leaves_a_complete_file`, `test_an_interrupted_write_cleans_up_and_keeps_the_old_file`, `test_the_backup_holds_the_previous_version`; `test_users.py`: `test_a_crash_before_the_index_is_written_leaves_no_account` |
+| T11 path traversal, symlinks, hard links | Random file names, allow-lists, links and foreign-owned files refused | #18, #19, #22 | `fsperm.py`: `create_private_file` (`O_EXCL` / `CREATE_NEW`), `check_private_dir` (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`); `storage.py`: `_FILE_NAME` allow-list, `data_dir_path`, `_read_private` (lstat, open, fstat, compare); `users.py`: username allow-list (`check_new_username`), vault files named after a random ID, `users.json` parsed strictly (`parse_index`) | `test_fsperm.py`: `test_posix_create_does_not_follow_a_symlink`, `test_posix_symlink_in_place_of_the_directory_is_refused`, `test_windows_junction_in_place_of_the_directory_is_refused`, `test_windows_symlink_in_place_of_the_directory_is_refused`, `test_a_file_in_place_of_the_directory_is_refused`; `test_storage.py`: `test_names_off_the_allow_list_are_refused`, `test_yunarpass_home_must_be_absolute_without_dotdot`, `test_a_symlink_is_refused`, `test_a_hard_link_is_refused`, `test_a_file_swapped_between_the_check_and_the_open_is_refused`; `test_users.py`: `test_a_bad_username_is_refused_and_nothing_is_written`, `test_allowed_usernames` (Windows device names such as `con` are fine, because a username never becomes a file name), `test_vault_files_are_named_after_a_random_id_never_the_username`, `test_malformed_indexes_are_refused` |
+| T12 other OS users read files | Owner-only permissions set at creation; checked again on use | #18, #19, #22 | `fsperm.py`: `make_private_dir`, `create_private_file`, `check_private_dir`, `check_private_fd`, `ensure_data_dir`; `storage.py`: `DataDir.open`, `_read_private` | `test_fsperm.py`: `test_posix_new_directory_is_0700`, `test_posix_new_file_is_0600`, `test_windows_acl_is_protected_with_one_entry_for_the_user`, `test_posix_loosened_directory_is_refused`, `test_posix_loosened_file_is_refused`, `test_windows_directory_with_an_entry_for_everyone_is_refused`, `test_windows_directory_with_inherited_entries_is_refused`, `test_windows_null_dacl_is_refused`, `test_*_owned_by_another_user_is_refused`; `test_storage.py`: `test_a_file_open_to_other_users_is_refused`, `test_open_refuses_a_directory_open_to_other_users`, `test_a_written_file_is_private`; `test_users.py`: `test_registered_files_are_owner_only` |
 | T13 secrets read from memory | Short key lifetime; keys in wipeable buffers; DEK zeroed on lock (best effort) | #16, #20, #28; CP3 | `crypto.py`: `derive_kek`/`unwrap_dek` return `bytearray`, `wipe`; `vaultfile.py`: KEKs wiped after every wrap and unwrap, the DEK if `create` fails | `test_crypto.py`: `test_wipe_zeroes_the_buffer_in_place`, `test_wrap_unwrap_round_trip`; `test_vaultfile.py`: `test_unlock_wipes_the_kek`, `test_create_wipes_the_dek_if_it_fails` |
 | T14 secrets in swap or crash dumps | Core dumps disabled where the OS allows | CP3 | — | — |
 | T15 unattended session | `lock` and 5-minute auto-lock | #28 | — | — |
