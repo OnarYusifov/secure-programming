@@ -1,9 +1,11 @@
-"""Tests for the REPL (threats T3, T4, T5, T16, T17, T18, T19, T20, T25, T28, T29)."""
+"""Tests for the REPL (threats T3, T4, T5, T13, T15, T16, T17, T18, T19, T20, T25, T28, T29)."""
 
 import getpass
 import io
 import re
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,22 +14,24 @@ from typing import Protocol
 import pytest
 
 from yunarpass import __version__, cli, crypto, entries, secrets_gen, storage, vaultfile
+from yunarpass.autolock import AUTO_LOCK_SECONDS, IdleTimer
 from yunarpass.cli import Console, Repl
-from yunarpass.clipboard import ClipboardError, ClipboardGuard, NoClipboard
+from yunarpass.clipboard import ClipboardError, ClipboardGuard, NoClipboard, thread_timer
 from yunarpass.session import Session, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
 from yunarpass.users import AccountError, Accounts, Backoff
 from yunarpass.vaultfile import Body
 
-type Typed = str | BaseException
+type Typed = str | BaseException | Callable[[], None]
 
 
 class FakeConsole:
     """Types lines and secrets into the REPL and records everything it writes.
 
     An exception in the input is raised instead of returned, the way Ctrl-C
-    would be. Once the input runs out, reading raises EOFError, like a closed
-    stdin.
+    would be. A function in the input is called while the prompt waits, before
+    the next item is read: time passing, for example. Once the input runs out,
+    reading raises EOFError, like a closed stdin.
     """
 
     def __init__(self, lines: Iterable[Typed] = (), secrets: Iterable[Typed] = ()) -> None:
@@ -38,12 +42,14 @@ class FakeConsole:
 
     @staticmethod
     def _next(queue: list[Typed]) -> str:
-        if not queue:
-            raise EOFError
-        item = queue.pop(0)
-        if isinstance(item, BaseException):
-            raise item
-        return item
+        while queue:
+            item = queue.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            if isinstance(item, str):
+                return item
+            item()
+        raise EOFError
 
     def read_line(self, prompt: str) -> str:
         self.output.append(prompt)
@@ -110,10 +116,61 @@ class Clipboard:
             callback()
 
 
+class Idle:
+    """The auto-lock's clocks and timers, which move only when a test says so."""
+
+    def __init__(self) -> None:
+        self.monotonic = 0.0
+        self.wall = 1_800_000_000.0
+        self.timer = IdleTimer(AUTO_LOCK_SECONDS, lambda: self.monotonic, lambda: self.wall)
+        self.timers: list[tuple[float, Callable[[], None]]] = []  # (when it is due, callback)
+
+    def call_later(self, seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
+        timer = (self.monotonic + seconds, callback)
+        self.timers.append(timer)
+
+        def cancel() -> None:
+            if timer in self.timers:
+                self.timers.remove(timer)
+
+        return cancel
+
+    def _advance(self, seconds: float) -> None:
+        self.monotonic += seconds
+        self.wall += seconds
+
+    def wait(self, seconds: float, *, asleep: bool = False) -> Callable[[], None]:
+        """Input for FakeConsole: time passes while the prompt waits.
+
+        Every timer that falls due runs, at its time. Asleep, the computer
+        sleeps instead: only the wall clock moves, and no timer runs.
+        """
+
+        def passing() -> None:
+            if asleep:
+                self.wall += seconds
+                return
+            end = self.monotonic + seconds
+            while due := [timer for timer in self.timers if timer[0] <= end]:
+                when, callback = timer = min(due, key=lambda timer: timer[0])
+                self.timers.remove(timer)
+                self._advance(when - self.monotonic)
+                callback()
+            self._advance(end - self.monotonic)
+
+        return passing
+
+
 @pytest.fixture(autouse=True)
 def _no_real_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Repl made without a clipboard must not reach the one of whoever runs the tests."""
     monkeypatch.setattr(cli, "system_clipboard", lambda: NoClipboard("not in tests"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_timers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Repl made without call_later gets auto-lock timers that never run."""
+    monkeypatch.setattr(cli, "thread_timer", lambda seconds, callback: lambda: None)
 
 
 @pytest.fixture
@@ -127,12 +184,18 @@ def clipboard() -> Clipboard:
 
 
 @pytest.fixture
-def run(accounts: Accounts, clipboard: Clipboard) -> Run:
+def idle() -> Idle:
+    return Idle()
+
+
+@pytest.fixture
+def run(accounts: Accounts, clipboard: Clipboard, idle: Idle) -> Run:
     """Run the REPL on typed lines and secrets until the input runs out."""
 
     def run_repl(*lines: Typed, secrets: Iterable[Typed] = ()) -> FakeConsole:
         fake = FakeConsole(lines, secrets)
-        assert Repl(accounts, fake.console(), clipboard.guard).run() == 0
+        repl = Repl(accounts, fake.console(), clipboard.guard, idle.timer, idle.call_later)
+        assert repl.run() == 0
         return fake
 
     return run_repl
@@ -1116,6 +1179,169 @@ def test_lock_takes_no_arguments(run: Run) -> None:
 
 def test_lock_needs_an_unlocked_vault(run: Run) -> None:
     assert cli.UNKNOWN_COMMAND in run("lock").text
+
+
+# --- Auto-lock (UC6; T13, T15, T18) --------------------------------------------------
+
+AUTO_LOCKED = "Vault locked after 5 minutes without input. Log in again to continue.\n"
+EMPTY = "The vault is empty."
+
+
+@pytest.mark.usefixtures("alice")
+def test_the_vault_locks_itself_after_five_minutes_without_input(
+    accounts: Accounts, clipboard: Clipboard, idle: Idle
+) -> None:
+    seen: list[tuple[bool, bytes, str | None]] = []
+    sessions: list[Session] = []
+
+    def remember() -> None:
+        assert repl.session is not None
+        sessions.append(repl.session)
+
+    def look() -> None:
+        (session,) = sessions
+        seen.append((session.closed, bytes(session._dek), clipboard.backend.text))
+
+    lines: list[Typed] = ["login", "alice", *ADD_GITHUB, "copy github", remember]
+    lines += [idle.wait(299), look, idle.wait(1), look, "list", "list"]
+    fake = FakeConsole(lines, [PASSWORD, SECRET, SECRET])
+    repl = Repl(accounts, fake.console(), clipboard.guard, idle.timer, idle.call_later)
+    assert repl.run() == 0
+    (session,) = sessions
+    open_dek = seen[0][1]
+    assert seen == [
+        (False, open_dek, SECRET),  # one second to go
+        (True, bytes(crypto.KEY_BYTES), None),  # locked, the DEK zeroed, the clipboard cleared
+    ]
+    assert open_dek != bytes(crypto.KEY_BYTES)
+    assert session._entries == {}
+    # The first line after the lock is not run, only answered; the next one
+    # meets the login prompt's commands.
+    assert f"{AUTO_LOCKED}{cli.PROMPT}{cli.UNKNOWN_COMMAND}\n" in fake.text
+    assert "1 entry:" not in fake.text
+    assert idle.timers == []
+
+
+@pytest.mark.usefixtures("alice")
+def test_input_starts_the_idle_time_again(run: Run, idle: Idle) -> None:
+    fake = unlocked(
+        run,
+        *(idle.wait(200), "list"),
+        *(idle.wait(299), "list"),
+        *(idle.wait(299), "list"),
+        *(idle.wait(300), "list"),
+    )
+    assert fake.text.count(EMPTY) == 3
+    assert fake.text.count(AUTO_LOCKED) == 1
+
+
+@pytest.mark.usefixtures("alice")
+def test_input_after_the_computer_slept_does_not_reach_the_vault(run: Run, idle: Idle) -> None:
+    # Asleep, the timer does not run and the monotonic clock may stop, but
+    # the wall clock counts the hour.
+    fake = unlocked(run, idle.wait(3600, asleep=True), "list")
+    assert AUTO_LOCKED in fake.text
+    assert EMPTY not in fake.text
+    assert idle.timers == []
+
+
+@pytest.mark.usefixtures("alice")
+def test_the_vault_locks_itself_while_a_command_waits_for_input(run: Run, idle: Idle) -> None:
+    fake = unlocked(
+        run,
+        *ADD_GITHUB[:2],
+        idle.wait(300),  # at the URL prompt
+        *ADD_GITHUB[2:],
+        "login",
+        "alice",
+        "list",
+        secrets=[SECRET, SECRET, PASSWORD],
+    )
+    assert f"Error: the vault is locked.\n{AUTO_LOCKED}{cli.PROMPT}" in fake.text
+    assert EMPTY in fake.text  # nothing was saved
+
+
+@pytest.mark.usefixtures("alice")
+def test_a_timer_left_from_an_earlier_session_does_nothing(accounts: Accounts, idle: Idle) -> None:
+    fake = FakeConsole(["alice", "alice"], [PASSWORD, PASSWORD])
+    repl = Repl(accounts, fake.console(), Clipboard().guard, idle.timer, idle.call_later)
+    repl.execute("login")
+    ((_, stale),) = idle.timers
+    repl.execute("lock")
+    assert idle.timers == []  # the lock stopped it
+    repl.execute("login")
+    idle.wait(300, asleep=True)()  # due by the clock, without running the new timer
+    stale()  # a timer that ran just as the lock stopped it
+    assert repl.session is not None
+    assert not repl.session.closed
+
+
+@pytest.mark.usefixtures("alice")
+def test_the_vault_locks_itself_on_a_real_timer(accounts: Accounts, clipboard: Clipboard) -> None:
+    sessions: list[Session] = []
+
+    def wait_for_the_lock() -> None:
+        session = repl.session
+        assert session is not None
+        sessions.append(session)
+        deadline = time.monotonic() + 10
+        while not session.closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    fake = FakeConsole(["login", "alice", wait_for_the_lock, "list"], [PASSWORD])
+    repl = Repl(accounts, fake.console(), clipboard.guard, IdleTimer(0.1), thread_timer)
+    assert repl.run() == 0
+    (session,) = sessions
+    assert session.closed
+    assert session._dek == bytearray(crypto.KEY_BYTES)
+    assert "Vault locked after 0.1 seconds without input. Log in again to continue.\n" in fake.text
+    assert EMPTY not in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_a_copy_under_way_as_the_vault_locks_is_cleared_too(
+    accounts: Accounts, clipboard: Clipboard, idle: Idle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeConsole(["alice", *ADD_GITHUB[1:]], [PASSWORD, SECRET, SECRET])
+    repl = Repl(accounts, fake.console(), clipboard.guard, idle.timer, idle.call_later)
+    repl.execute("login")
+    repl.execute(ADD_GITHUB[0])
+    copy = clipboard.guard.copy
+    waited: list[bool] = []
+    lockers: list[threading.Thread] = []
+
+    def copy_while_locking(text: str) -> None:
+        # The vault locks on another thread, as on the auto-lock timer, just
+        # as the password is about to be copied.
+        locker = threading.Thread(target=repl.lock)
+        lockers.append(locker)
+        locker.start()
+        locker.join(timeout=0.2)
+        waited.append(locker.is_alive())
+        copy(text)
+
+    monkeypatch.setattr(clipboard.guard, "copy", copy_while_locking)
+    repl.execute("copy github")
+    (locker,) = lockers
+    locker.join()
+    assert waited == [True]  # the lock waited for the copy to finish
+    assert clipboard.backend.written == [SECRET]
+    assert clipboard.backend.text is None  # and then cleared it
+    assert repl.session is None
+
+
+@pytest.mark.parametrize(
+    ("seconds", "said"),
+    [
+        (300, "5 minutes"),
+        (60, "1 minute"),
+        (90, "90 seconds"),
+        (1, "1 second"),
+        (0.5, "0.5 seconds"),
+    ],
+)
+def test_the_notice_names_the_timeout(seconds: float, said: str) -> None:
+    assert cli._duration(seconds) == said
 
 
 # --- Entries with the same name, and IDs (T29) ---------------------------------------
