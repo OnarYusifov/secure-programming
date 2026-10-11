@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-yunarpass = "yunarpass.__main__:main"
+yunarpass = "yunarpass.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
