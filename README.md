@@ -255,5 +255,5 @@ pass, and `main` requires it. With gitleaks installed, the secret scan runs loca
 | Checkpoint | Due | State |
 |---|---|---|
 | 1. Threat model and architecture | 25 Sep 2026 | Done: [DESIGN.md](DESIGN.md) |
-| 2. Core implemented | 30 Oct 2026 | In progress: [PROGRESS.md](PROGRESS.md) |
+| 2. Core implemented | 30 Oct 2026 | Core requirements done: [PROGRESS.md](PROGRESS.md). Desktop GUI in progress |
 | 3. Near-final | 20 Nov 2026 | Not started |
