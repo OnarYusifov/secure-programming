@@ -29,9 +29,12 @@ from yunarpass.vaultfile import VaultFormatError
 LOGIN = "login"
 
 # Explicit ASCII ranges, used with fullmatch only (see vaultfile.USERNAME).
-NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+# The first character is a letter or a digit, so a name never looks like an
+# option ("-rf") and "-" stays free to mean "clear this field" in edit.
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}")
 NAME_RULE = (
-    "an entry name has 1 to 64 characters: letters, digits, '.', '_', '@' and '-', without spaces"
+    "an entry name has 1 to 64 characters: letters, digits, '.', '_', '@' and '-', "
+    "starting with a letter or a digit"
 )
 
 MAX_USERNAME = 256
