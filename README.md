@@ -27,7 +27,7 @@ Out of scope: browser integration, cloud sync, sharing entries between users, an
 against a compromised operating system or administrator-level malware (see the assumptions in
 [DESIGN.md](DESIGN.md#assumptions-and-out-of-scope)).
 
-## Planned commands
+## Commands
 
 The tool is an interactive prompt (REPL). Secrets are always entered at a masked prompt, never as
 command-line arguments, so they cannot end up in the shell history or the process list.
@@ -42,7 +42,8 @@ back, in case it was a password typed at the wrong prompt. Text that comes from 
 printed without control characters, terminal escape sequences or bidirectional controls, so it
 cannot clear the screen, move the cursor or disguise itself. Errors are short messages, never a
 traceback. Ctrl-C cancels the command in progress; at the prompt, Ctrl-C or the end of input (Ctrl-D,
-or Ctrl-Z then Enter on Windows) exits. The program itself takes no command-line arguments.
+or Ctrl-Z then Enter on Windows) exits. The program itself takes no command-line arguments other
+than `--version` and `--help`, and refuses any other without printing it back.
 
 Before unlocking:
 
@@ -83,13 +84,13 @@ After unlocking (`yunarpass:<username>>` prompt):
 | Command | Action |
 |---|---|
 | `add <name>` | Add a login entry: prompts for username, password (masked; type `gen` to generate one), URL and notes |
-| `add-totp <name>` | Add a TOTP secret |
-| `add-ssh <name> <path>` | Import an SSH private key file into the vault |
+| `add-totp <name>` | Add a TOTP secret (Checkpoint 3) |
+| `add-ssh <name> <path>` | Import an SSH private key file into the vault (Checkpoint 3) |
 | `list` | List the entries: ID, name, type and username, never a password |
 | `show <name or ID>` | Show an entry; the password is always masked |
 | `copy <name or ID>` | Copy the password to the clipboard; cleared after 20 s, and kept out of the clipboard history on Windows |
-| `totp <name>` | Show the current TOTP code |
-| `ssh-load <name>` | Load the key into `ssh-agent` for 10 minutes |
+| `totp <name>` | Show the current TOTP code (Checkpoint 3) |
+| `ssh-load <name>` | Load the key into `ssh-agent` for 10 minutes (Checkpoint 3) |
 | `edit <name or ID>` | Edit an entry: Enter keeps a value, `-` clears it; the password prompt is masked and also accepts `gen` |
 | `rm <name or ID>` | Delete an entry, after showing it and asking you to type `yes` |
 | `gen [length]` | Generate a password (20 characters by default, 12 to 128) with letters, digits and symbols, and copy it to the clipboard; it is never printed |
