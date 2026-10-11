@@ -62,7 +62,14 @@ derived with Argon2id. The recovery key is then printed once, as eight groups of
 Write it down: it is not stored anywhere, and it is the only way back in if the master password is
 forgotten.
 
-After unlocking (`yunarpass>` prompt):
+`login` asks for the username and the master password. Every failure, whether an unknown
+username, a wrong password or a damaged or swapped vault file, gives the same `Login failed.`, and
+each one makes the next attempt wait longer: 1 s, then 2, 4 and so on up to 32 s. After unlocking,
+yunarpass prints how many times the vault has been saved. If that number is lower than you
+remember, an older copy of the vault file was put back in place. `quit`, Ctrl-C at the prompt and
+the end of input lock the vault, which wipes its key from memory.
+
+After unlocking (`yunarpass:<username>>` prompt):
 
 | Command | Action |
 |---|---|
