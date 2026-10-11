@@ -130,6 +130,7 @@ class Repl:
             "rm": Command(self.rm, "Delete an entry", _REF),
             "gen": Command(self.gen, "Copy a new random password to the clipboard", "[length]"),
             "passwd": Command(self.passwd, "Change the master password"),
+            "lock": Command(self.lock, "Lock the vault and clear the clipboard"),
             "help": Command(self.help, "Show this list"),
             "quit": Command(self.quit, "Lock the vault and exit"),
         }
@@ -158,15 +159,22 @@ class Repl:
             self.lock()  # however the loop ends, the DEK is wiped
         return 0
 
-    def lock(self) -> None:
-        """Clear our copy from the clipboard (T18) and close the session: the DEK is wiped (T13)."""
+    def lock(self, args: str = "") -> None:
+        """The lock command, also run whenever the loop ends: back to the login prompt.
+
+        The session is closed first, which wipes the DEK (T13) once any use of
+        it has finished, such as a copy in progress. Then our copy, if it is
+        still there, is cleared from the clipboard (T18).
+        """
+        _no_arguments("lock", args)
+        session, self.session = self.session, None
+        if session is not None:
+            session.close()
         try:
             self.clipboard.clear()
         except ClipboardError as error:
             self.say(f"Error: {error}.")
-        if self.session is not None:
-            self.session.close()
-            self.session = None
+        if session is not None:
             self.say("Vault locked.")
 
     def execute(self, line: str) -> None:
