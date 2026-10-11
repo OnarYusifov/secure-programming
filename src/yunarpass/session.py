@@ -17,7 +17,7 @@ save is refused rather than overwriting that change (T28).
 
 import dataclasses
 
-from yunarpass import crypto, entries, vaultfile
+from yunarpass import crypto, entries, policy, vaultfile
 from yunarpass.clipboard import ClipboardGuard
 from yunarpass.entries import EntryError, EntrySummary, EntryView, LoginEntry
 from yunarpass.storage import DataDir, StorageError, vault_file_name
@@ -140,6 +140,20 @@ class Session:
         """Delete an entry and save."""
         old_key = entries.key(self._find(name).name)
         self._save({k: entry for k, entry in self._entries.items() if k != old_key})
+
+    def change_password(self, current: str, new: str) -> None:
+        """Wrap the DEK under a new master password, and save (UC7).
+
+        The current password must unwrap the DEK first, or CryptoError is
+        raised and nothing changes. Only the password copy of the DEK is
+        replaced; the entries are not encrypted again, and the recovery key
+        keeps working. Accounts.change_password adds the delay after a wrong
+        current password; user interfaces call that one.
+        """
+        self._check_open()
+        policy.check_master_password(new)
+        crypto.wipe(vaultfile.unlock_with_password(self.vault, current))
+        self._write(vaultfile.rewrap_password(self.vault, self._dek, new))
 
     # --- Inside ----------------------------------------------------------------------
 

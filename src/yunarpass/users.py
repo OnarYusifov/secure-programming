@@ -1,4 +1,4 @@
-"""User management: the accounts in a data directory (UC1, UC2).
+"""User management: the accounts in a data directory (UC1, UC2, UC7).
 
 users.json is the index of accounts, username to vault ID, and holds no
 secrets. It is parsed as strictly as a vault file (DESIGN.md §4):
@@ -51,6 +51,13 @@ class LoginError(AccountError):
 
     def __init__(self) -> None:
         super().__init__("login failed")
+
+
+class WrongPasswordError(AccountError):
+    """The current master password given to change it was wrong."""
+
+    def __init__(self) -> None:
+        super().__init__("the current master password is wrong, so it was not changed")
 
 
 class Backoff:
@@ -185,6 +192,25 @@ class Accounts:
         self.backoff.succeeded()
         return session
 
+    def change_password(self, session: Session, current: str, new: str) -> None:
+        """Change the user's master password (UC7).
+
+        The new password must meet the policy (PolicyError), which is checked
+        first and costs no delay. A wrong current password waits like a
+        failed login, with the same growing delay, and raises
+        WrongPasswordError (T2). The vault is not encrypted again: only the
+        password copy of the DEK is wrapped under a key from the new password
+        and a new salt (T1, T7).
+        """
+        policy.check_master_password(new)
+        self.backoff.wait()
+        try:
+            session.change_password(current, new)
+        except CryptoError:
+            self._delay()
+            raise WrongPasswordError from None
+        self.backoff.succeeded()
+
     def _find_vault(self, username: str) -> VaultFile | None:
         """The user's vault, or None if there is no usable one."""
         if not isinstance(username, str) or not USERNAME.fullmatch(username):
@@ -205,7 +231,10 @@ class Accounts:
             return None
         return vault
 
-    def _fail(self) -> NoReturn:
+    def _delay(self) -> None:
         self.backoff.failed()
         self.backoff.wait()
+
+    def _fail(self) -> NoReturn:
+        self._delay()
         raise LoginError
