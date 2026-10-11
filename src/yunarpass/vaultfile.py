@@ -402,6 +402,19 @@ def unlock_with_recovery_key(vault: VaultFile, recovery_key: bytes) -> bytearray
     return _unwrap(kek, vault.recovery_dek, vault.header.recovery_aad())
 
 
+def rewrap_recovery(vault: VaultFile, dek: Key, recovery_key: bytes) -> VaultFile:
+    """The vault with the DEK wrapped under a new recovery key (UC8).
+
+    The recovery copy gets a fresh HKDF salt. The body and the password copy
+    stay exactly as they are: neither binds the recovery salt (D10), so both
+    remain valid.
+    """
+    header = dataclasses.replace(vault.header, recovery_salt=secrets.token_bytes(crypto.SALT_BYTES))
+    kek = crypto.derive_recovery_kek(recovery_key, header.recovery_salt)
+    recovery_dek = _wrap(kek, dek, header.recovery_aad())
+    return VaultFile(header, vault.password_dek, recovery_dek, vault.body)
+
+
 def seal_body(header: Header, dek: Key, body: Body) -> Sealed:
     """Encrypt a body under the DEK with a fresh nonce."""
     return crypto.encrypt(dek, serialize_body(body), header.body_aad())

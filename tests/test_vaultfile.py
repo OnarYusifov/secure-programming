@@ -439,6 +439,49 @@ def test_rewrapping_keeps_stronger_kdf_parameters() -> None:
     assert vaultfile.unlock_with_password(changed, "a brand new password") == dek
 
 
+NEW_RECOVERY_KEY = bytes(range(100, 120))
+
+
+def test_rewrapping_the_recovery_copy_leaves_the_rest_valid(
+    vault: VaultFile, dek: bytearray
+) -> None:
+    # A recovery (UC8) replaces the recovery key. The password copy and the
+    # body are not touched and must still work.
+    changed = vaultfile.rewrap_recovery(vault, dek, NEW_RECOVERY_KEY)
+    changed = vaultfile.parse(vaultfile.serialize(changed))
+    assert vaultfile.unlock_with_recovery_key(changed, NEW_RECOVERY_KEY) == dek
+    with pytest.raises(CryptoError):
+        vaultfile.unlock_with_recovery_key(changed, RECOVERY_KEY)
+    assert vaultfile.unlock_with_password(changed, PASSWORD) == dek
+    assert vaultfile.open_body(changed, dek) == Body(7, ENTRIES)
+
+
+def test_rewrapping_changes_only_the_recovery_copy(vault: VaultFile, dek: bytearray) -> None:
+    before = as_doc(vault)
+    after = as_doc(vaultfile.rewrap_recovery(vault, dek, RECOVERY_KEY))
+    # Even the same key gives a new copy: the salt is fresh every time.
+    assert after["wrapped_dek"]["recovery"]["salt"] != before["wrapped_dek"]["recovery"]["salt"]
+    assert after["wrapped_dek"]["recovery"]["ct"] != before["wrapped_dek"]["recovery"]["ct"]
+    for doc in (before, after):
+        del doc["wrapped_dek"]["recovery"]
+    assert after == before  # the identity, the KDF inputs, the password copy and the body
+
+
+def test_rewrapping_the_recovery_copy_wipes_the_kek(
+    vault: VaultFile, dek: bytearray, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keks: list[bytearray] = []
+    real = crypto.derive_recovery_kek
+
+    def keep(recovery_key: crypto.Key, salt: bytes) -> bytearray:
+        keks.append(real(recovery_key, salt))
+        return keks[-1]
+
+    monkeypatch.setattr(crypto, "derive_recovery_kek", keep)
+    vaultfile.rewrap_recovery(vault, dek, NEW_RECOVERY_KEY)
+    assert keks == [bytearray(32)]
+
+
 # --- The body (T9) -------------------------------------------------------------------------
 
 
