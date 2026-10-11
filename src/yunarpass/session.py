@@ -18,6 +18,7 @@ save is refused rather than overwriting that change (T28).
 import dataclasses
 
 from yunarpass import crypto, entries, vaultfile
+from yunarpass.clipboard import ClipboardGuard
 from yunarpass.entries import EntryError, EntrySummary, EntryView, LoginEntry
 from yunarpass.storage import DataDir, StorageError, vault_file_name
 from yunarpass.vaultfile import Body, VaultFile, VaultFormatError
@@ -77,6 +78,14 @@ class Session:
     def view(self, name: str) -> EntryView:
         """Every field of an entry except the password (T25)."""
         return self._find(name).view()
+
+    def copy_password(self, name: str, clipboard: ClipboardGuard) -> None:
+        """Put an entry's password on the clipboard, which clears it again (T18).
+
+        The password goes from the entry to the clipboard and never to a user
+        interface (T25).
+        """
+        clipboard.copy(self._find(name).password)
 
     def check_new_name(self, name: str) -> None:
         """Raise EntryError unless the name is allowed and no entry has it yet."""
