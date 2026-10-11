@@ -522,6 +522,13 @@ SECRET = "s3cret-Password!"
 ADD_GITHUB = ("add github", "alice@example.com", "https://github.com", "personal")
 
 
+def stored_password(accounts: Accounts, name: str) -> str:
+    """The password of alice's only entry with this name, read the way login does."""
+    session = accounts.login("alice", PASSWORD)
+    (summary,) = session.find(name)
+    return session._entries[summary.id].password
+
+
 def unlocked(run: Run, *lines: Typed, secrets: Iterable[Typed] = ()) -> FakeConsole:
     """Log in as alice, then type the lines."""
     return run("login", "alice", *lines, secrets=[PASSWORD, *secrets])
@@ -620,13 +627,6 @@ def test_an_unknown_entry_is_refused(run: Run, command: str) -> None:
 
 
 @pytest.mark.usefixtures("alice")
-def test_add_refuses_a_taken_name_before_asking_anything(run: Run) -> None:
-    fake = unlocked(run, *ADD_GITHUB, "add GitHub", secrets=[SECRET, SECRET])
-    assert "Error: an entry with that name already exists.\n" in fake.text
-    assert fake.text.count("Username: ") == 2  # at login and in the first add only
-
-
-@pytest.mark.usefixtures("alice")
 def test_add_refuses_two_different_passwords_and_saves_nothing(run: Run) -> None:
     fake = unlocked(run, "add github", "alice", "list", secrets=[SECRET, SECRET + "!"])
     assert "Error: the two passwords are different, so nothing was saved.\n" in fake.text
@@ -698,25 +698,7 @@ def test_edit_without_changes_saves_nothing(run: Run) -> None:
 def test_edit_can_change_the_password(run: Run, accounts: Accounts) -> None:
     new = "an0ther-Secret!"
     unlocked(run, *ADD_GITHUB, "edit github", "", "", "", "", secrets=[SECRET, SECRET, new, new])
-    session = accounts.login("alice", PASSWORD)
-    assert session._entries["github"].password == new
-
-
-@pytest.mark.usefixtures("alice")
-def test_edit_refuses_a_rename_onto_another_entry(run: Run) -> None:
-    fake = unlocked(
-        run,
-        *ADD_GITHUB,
-        "add mail",
-        "",
-        "",
-        "",
-        "edit github",
-        "MAIL",
-        secrets=[SECRET] * 4,
-    )
-    assert "Error: an entry with that name already exists.\n" in fake.text
-    assert "Username [alice@example.com]: " not in fake.text  # it stopped at the name
+    assert stored_password(accounts, "github") == new
 
 
 @pytest.mark.usefixtures("alice")
@@ -905,7 +887,7 @@ def test_gen_at_the_password_prompt_fills_the_entry(
     (password,) = clipboard.backend.written
     assert len(password) == 20
     assert password not in fake.text
-    assert accounts.login("alice", PASSWORD)._entries["github"].password == password
+    assert stored_password(accounts, "github") == password
 
 
 @pytest.mark.usefixtures("alice")
@@ -914,7 +896,7 @@ def test_gen_at_the_edit_password_prompt_replaces_the_password(
 ) -> None:
     lines = ("edit github", "", "", "", "")
     fake = unlocked(run, *ADD_GITHUB, *lines, secrets=[SECRET, SECRET, "gen"])
-    new = accounts.login("alice", PASSWORD)._entries["github"].password
+    new = stored_password(accounts, "github")
     assert new != SECRET
     assert len(new) == 20
     assert new not in fake.text

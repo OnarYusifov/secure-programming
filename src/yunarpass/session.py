@@ -9,6 +9,10 @@ under a fresh nonce, and the vault file is replaced atomically (T6, T9, T10).
 The entries in memory change only after the save succeeded, so a failed save
 leaves the session as it was.
 
+Entries are addressed by their ID, which is unique in the vault; names may
+repeat. find() turns what a user typed, a name or the start of an ID, into the
+entries it matches, and the user interface decides what to do with several.
+
 Before writing, the vault file is read again and must still be the version
 this session loaded or last saved. If another session of the same account
 saved in between (a second prompt, or the CLI and the GUI open together), the
@@ -16,6 +20,7 @@ save is refused rather than overwriting that change (T28).
 """
 
 import dataclasses
+from collections.abc import Iterable
 
 from yunarpass import crypto, entries, policy, vaultfile
 from yunarpass.clipboard import ClipboardGuard
@@ -71,43 +76,59 @@ class Session:
     # --- Reading ---------------------------------------------------------------------
 
     def summaries(self) -> list[EntrySummary]:
-        """Every entry's name and type, sorted by name without regard to case."""
-        self._check_open()
-        short = self._short_ids()
-        return [self._entries[k].summary(short[self._entries[k].id]) for k in sorted(self._entries)]
+        """Every entry's ID, name, type and username (never the password).
 
-    def view(self, name: str) -> EntryView:
+        Sorted by name without regard to case, then from the oldest entry.
+        """
+        self._check_open()
+        return self._summarise(self._entries.values())
+
+    def find(self, ref: str) -> list[EntrySummary]:
+        """The entries a user means by a name or an ID, sorted like summaries().
+
+        6 to 32 hex characters that start at least one entry's ID mean those
+        entries, in any case. Anything else is a name, compared without
+        regard to case. An empty list means nothing matches; more than one
+        entry means the user has to choose. Raises EntryError if ref is
+        neither a name nor an ID.
+        """
+        self._check_open()
+        entries.check_name(ref)  # hex digits are letters and digits: an ID passes too
+        if entries.ID_PREFIX.fullmatch(ref):
+            start = ref.lower()
+            by_id = [entry for entry in self._entries.values() if entry.id.startswith(start)]
+            if by_id:
+                return self._summarise(by_id)
+        name = entries.key(ref)
+        return self._summarise(e for e in self._entries.values() if entries.key(e.name) == name)
+
+    def view(self, entry_id: str) -> EntryView:
         """Every field of an entry except the password (T25)."""
-        entry = self._find(name)
+        entry = self._get(entry_id)
         return entry.view(self._short_ids()[entry.id])
 
-    def copy_password(self, name: str, clipboard: ClipboardGuard) -> None:
+    def copy_password(self, entry_id: str, clipboard: ClipboardGuard) -> None:
         """Put an entry's password on the clipboard, which clears it again (T18).
 
         The password goes from the entry to the clipboard and never to a user
         interface (T25).
         """
-        clipboard.copy(self._find(name).password)
-
-    def check_new_name(self, name: str) -> None:
-        """Raise EntryError unless the name is allowed and no entry has it yet."""
-        self._check_open()
-        if entries.key(entries.check_name(name)) in self._entries:
-            raise EntryError("an entry with that name already exists")
+        clipboard.copy(self._get(entry_id).password)
 
     # --- Changing (each one saves) ---------------------------------------------------
 
-    def add(self, name: str, *, username: str, password: str, url: str, notes: str) -> None:
-        """Add a login entry and save."""
-        self.check_new_name(name)
+    def add(self, name: str, *, username: str, password: str, url: str, notes: str) -> EntrySummary:
+        """Add a login entry with a new random ID, and save. Returns its summary."""
+        self._check_open()
         entry = entries.new_login(name, username=username, password=password, url=url, notes=notes)
-        self._save({**self._entries, entries.key(name): entry})
+        self._save({**self._entries, entry.id: entry})
+        return entry.summary(self._short_ids()[entry.id])
 
     def update(
         self,
-        name: str,
+        entry_id: str,
         *,
-        new_name: str | None = None,
+        name: str | None = None,
         username: str | None = None,
         password: str | None = None,
         url: str | None = None,
@@ -118,30 +139,22 @@ class Session:
         The interface never holds the stored password, so this takes changes
         rather than a whole entry: a password of None keeps the stored one.
         """
-        old = self._find(name)
-        if new_name is not None and entries.key(new_name) != entries.key(old.name):
-            self.check_new_name(new_name)
+        old = self._get(entry_id)
         new = dataclasses.replace(
             old,
-            name=old.name if new_name is None else new_name,
+            name=old.name if name is None else name,
             username=old.username if username is None else username,
             password=old.password if password is None else password,
             url=old.url if url is None else url,
             notes=old.notes if notes is None else notes,
             modified=entries.timestamp(),
         )  # every field is checked again
-        old_key = entries.key(old.name)
-        self._save(
-            {
-                (entries.key(new.name) if k == old_key else k): (new if k == old_key else entry)
-                for k, entry in self._entries.items()
-            }
-        )
+        self._save({k: (new if k == old.id else entry) for k, entry in self._entries.items()})
 
-    def remove(self, name: str) -> None:
+    def remove(self, entry_id: str) -> None:
         """Delete an entry and save."""
-        old_key = entries.key(self._find(name).name)
-        self._save({k: entry for k, entry in self._entries.items() if k != old_key})
+        old = self._get(entry_id)
+        self._save({k: entry for k, entry in self._entries.items() if k != old.id})
 
     def change_password(self, current: str, new: str) -> None:
         """Wrap the DEK under a new master password, and save (UC7).
@@ -163,15 +176,23 @@ class Session:
         if self.closed:
             raise VaultLockedError
 
-    def _short_ids(self) -> dict[str, str]:
-        return entries.short_ids(entry.id for entry in self._entries.values())
-
-    def _find(self, name: str) -> LoginEntry:
+    def _get(self, entry_id: str) -> LoginEntry:
+        """The entry with exactly this (full) ID."""
         self._check_open()
-        entry = self._entries.get(entries.key(entries.check_name(name)))
+        entry = self._entries.get(entry_id) if isinstance(entry_id, str) else None
         if entry is None:
-            raise EntryError("there is no entry with that name")
+            raise EntryError("there is no entry with that ID")
         return entry
+
+    def _short_ids(self) -> dict[str, str]:
+        return entries.short_ids(self._entries)
+
+    def _summarise(self, chosen: Iterable[LoginEntry]) -> list[EntrySummary]:
+        short = self._short_ids()
+        # sorted() is stable: entries with the same name and creation second
+        # stay in their saved order, which is the order they were added in.
+        ordered = sorted(chosen, key=lambda e: (entries.key(e.name), e.created))
+        return [entry.summary(short[entry.id]) for entry in ordered]
 
     def _save(self, new_entries: dict[str, LoginEntry]) -> None:
         """Encrypt the entries as the next version of the body and write the vault."""
@@ -207,11 +228,14 @@ class Session:
 
 
 def _load(body: Body) -> dict[str, LoginEntry]:
-    """The body's entries by name, in their saved order. Raises VaultFormatError."""
+    """The body's entries by ID, in their saved order. Raises VaultFormatError.
+
+    Two entries may have the same name, never the same ID.
+    """
     loaded: dict[str, LoginEntry] = {}
     for doc in body.entries:
         entry = entries.from_json(doc)
-        if entries.key(entry.name) in loaded:
-            raise VaultFormatError("entries: two entries have the same name")
-        loaded[entries.key(entry.name)] = entry
+        if entry.id in loaded:
+            raise VaultFormatError("entries: two entries have the same ID")
+        loaded[entry.id] = entry
     return loaded
