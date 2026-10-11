@@ -1,4 +1,4 @@
-"""Tests for the unlocked session and its entries (threats T6, T9, T13, T19, T25, T28)."""
+"""Tests for the unlocked session and its entries (threats T6, T9, T13, T18, T19, T25, T28)."""
 
 import dataclasses
 from collections.abc import Callable
@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from yunarpass import crypto, storage, vaultfile
+from yunarpass.clipboard import ClipboardGuard
 from yunarpass.entries import EntryError
 from yunarpass.session import Session, VaultChangedError, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
@@ -276,3 +277,44 @@ def test_a_vault_file_changed_behind_the_session_is_not_overwritten(
         session._data_dir.write(path.name, path.with_name(path.name + ".bak").read_bytes())
     with pytest.raises(VaultChangedError):
         add_github(session, "mail")
+
+
+# --- Copying a password (T18, T25) ---------------------------------------------------
+
+
+class MemoryClipboard:
+    """A clipboard backend in memory."""
+
+    def __init__(self) -> None:
+        self.text: str | None = None
+
+    def read(self) -> str | None:
+        return self.text
+
+    def write(self, text: str) -> None:
+        self.text = text
+
+    def clear(self) -> None:
+        self.text = None
+
+
+def guard(backend: MemoryClipboard) -> ClipboardGuard:
+    return ClipboardGuard(backend, lambda seconds, callback: lambda: None)
+
+
+def test_copy_password_hands_the_password_to_the_clipboard_only(session: Session) -> None:
+    add_github(session)
+    backend = MemoryClipboard()
+    session.copy_password("GitHub", guard(backend))
+    assert backend.text == SECRET
+
+
+def test_copy_password_refuses_an_unknown_entry_or_a_closed_session(session: Session) -> None:
+    backend = MemoryClipboard()
+    with pytest.raises(EntryError, match="no entry"):
+        session.copy_password("github", guard(backend))
+    add_github(session)
+    session.close()
+    with pytest.raises(VaultLockedError):
+        session.copy_password("github", guard(backend))
+    assert backend.text is None
