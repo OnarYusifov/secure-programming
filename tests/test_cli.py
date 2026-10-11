@@ -1,4 +1,4 @@
-"""Tests for the REPL (threats T3, T16, T17, T19)."""
+"""Tests for the REPL (threats T3, T16, T17, T19, T25, T28)."""
 
 import getpass
 import io
@@ -10,7 +10,7 @@ from typing import Protocol
 
 import pytest
 
-from yunarpass import __version__, cli, storage, vaultfile
+from yunarpass import __version__, cli, entries, storage, vaultfile
 from yunarpass.cli import Console, Repl
 from yunarpass.session import Session
 from yunarpass.storage import DataDir, StorageError
@@ -424,7 +424,16 @@ def test_login_takes_no_arguments(run: Run) -> None:
 @pytest.mark.usefixtures("alice")
 def test_unlocked_the_prompt_offers_only_the_unlocked_commands(run: Run) -> None:
     fake = run("login", "alice", "help", "register", "login", secrets=[PASSWORD])
-    assert ("Commands:\n  help  Show this list\n  quit  Lock the vault and exit\n") in fake.text
+    assert (
+        "Commands:\n"
+        "  add <name>   Add a login entry\n"
+        "  list         List the entries\n"
+        "  show <name>  Show an entry; the password stays masked\n"
+        "  edit <name>  Change an entry\n"
+        "  rm <name>    Delete an entry\n"
+        "  help         Show this list\n"
+        "  quit         Lock the vault and exit\n"
+    ) in fake.text
     assert fake.text.count(cli.UNKNOWN_COMMAND) == 2
 
 
@@ -450,3 +459,261 @@ def test_leaving_the_prompt_locks_the_vault(
     assert repl.session is None
     assert len(closed) == 1
     assert fake.text.endswith("Vault locked.\n")
+
+
+# --- Entries (UC3; T19, T25, T28) ----------------------------------------------------
+
+SECRET = "s3cret-Password!"
+ADD_GITHUB = ("add github", "alice@example.com", "https://github.com", "personal")
+
+
+def unlocked(run: Run, *lines: Typed, secrets: Iterable[Typed] = ()) -> FakeConsole:
+    """Log in as alice, then type the lines."""
+    return run("login", "alice", *lines, secrets=[PASSWORD, *secrets])
+
+
+@pytest.mark.usefixtures("alice")
+def test_add_then_list_and_show(run: Run) -> None:
+    fake = unlocked(run, *ADD_GITHUB, "list", "show github", secrets=[SECRET, SECRET])
+    assert fake.secret_prompts == ["Master password: ", "Password: ", "Repeat the password: "]
+    assert "Added github.\n" in fake.text
+    assert "1 entry:\n  github  login\n" in fake.text
+    assert re.search(
+        r"  Name:     github\n"
+        r"  Type:     login\n"
+        r"  Username: alice@example\.com\n"
+        r"  Password: \*{8}\n"
+        r"  URL:      https://github\.com\n"
+        r"  Created:  [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC\n"
+        r"  Modified: [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC\n"
+        r"  Notes:    personal\n",
+        fake.text,
+    )
+
+
+@pytest.mark.usefixtures("alice")
+def test_no_password_is_ever_printed(run: Run) -> None:
+    new = "an0ther-Secret!"
+    fake = unlocked(
+        run,
+        *ADD_GITHUB,
+        "show github",
+        "list",
+        "edit github",
+        "",
+        "",
+        "",
+        "",
+        "show github",
+        secrets=[SECRET, SECRET, new, new],
+    )
+    assert "Saved the changes to github.\n" in fake.text
+    assert fake.text.count("  Password: ********\n") == 2
+    for secret in (SECRET, new, PASSWORD):
+        assert secret not in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_entries_persist_after_quit(run: Run) -> None:
+    unlocked(run, *ADD_GITHUB, "quit", secrets=[SECRET, SECRET])
+    fake = unlocked(run, "list")
+    assert "Vault unlocked. Saved 1 time.\n" in fake.text
+    assert "  github  login\n" in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_list_of_an_empty_vault(run: Run) -> None:
+    fake = unlocked(run, "list")
+    assert "The vault is empty. Add an entry with: add <name>\n" in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_list_takes_no_arguments(run: Run) -> None:
+    fake = unlocked(run, "list secret-word")
+    assert "Error: list takes no arguments.\n" in fake.text
+    assert "secret-word" not in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize("command", ["add", "show", "edit", "rm"])
+def test_an_entry_command_needs_a_name(run: Run, command: str) -> None:
+    fake = unlocked(run, command)
+    assert f"Error: {command} needs the name of an entry: {command} <name>.\n" in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize("command", ["add", "show", "edit", "rm"])
+@pytest.mark.parametrize("name", ["../secret-name", "secret name", "\x1b[2Jsecret-name"])
+def test_a_name_off_the_allow_list_is_refused_and_not_echoed(
+    run: Run, command: str, name: str
+) -> None:
+    fake = unlocked(run, f"{command} {name}")
+    assert f"Error: {entries.NAME_RULE}.\n" in fake.text
+    assert "secret" not in fake.text
+    assert fake.secret_prompts == ["Master password: "]
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize("command", ["show github", "edit github", "rm github"])
+def test_an_unknown_entry_is_refused(run: Run, command: str) -> None:
+    fake = unlocked(run, command)
+    assert "Error: there is no entry with that name.\n" in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_add_refuses_a_taken_name_before_asking_anything(run: Run) -> None:
+    fake = unlocked(run, *ADD_GITHUB, "add GitHub", secrets=[SECRET, SECRET])
+    assert "Error: an entry with that name already exists.\n" in fake.text
+    assert fake.text.count("Username: ") == 2  # at login and in the first add only
+
+
+@pytest.mark.usefixtures("alice")
+def test_add_refuses_two_different_passwords_and_saves_nothing(run: Run) -> None:
+    fake = unlocked(run, "add github", "alice", "list", secrets=[SECRET, SECRET + "!"])
+    assert "Error: the two passwords are different, so nothing was saved.\n" in fake.text
+    assert "URL: " not in fake.text
+    assert "The vault is empty." in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_add_refuses_an_empty_password_before_asking_again(run: Run) -> None:
+    fake = unlocked(run, "add github", "alice", secrets=[""])
+    assert "Error: an entry needs a password.\n" in fake.text
+    assert "Repeat the password: " not in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+@pytest.mark.parametrize(
+    ("username", "error"),
+    [
+        ("x" * 257, "the username can have at most 256 characters"),
+        ("alice\x1b[2J", "the username contains a control character"),
+    ],
+)
+def test_add_checks_each_answer_as_it_is_typed(run: Run, username: str, error: str) -> None:
+    fake = unlocked(run, "add github", username)
+    assert f"Error: {error}.\n" in fake.text
+    assert fake.secret_prompts == ["Master password: "]  # no entry password asked for
+
+
+@pytest.mark.usefixtures("alice")
+def test_edit_keeps_on_enter_clears_on_a_dash_and_renames(run: Run) -> None:
+    fake = unlocked(
+        run,
+        *ADD_GITHUB,
+        "edit github",
+        "code",  # name
+        "-",  # username: cleared
+        "https://example.com",  # URL
+        "",  # notes: kept
+        "show code",
+        "list",
+        secrets=[SECRET, SECRET, ""],  # Enter keeps the password
+    )
+    for prompt in (
+        "Name [github]: ",
+        "Username [alice@example.com]: ",
+        "URL [https://github.com]: ",
+        "Notes [personal]: ",
+    ):
+        assert prompt in fake.text
+    assert fake.secret_prompts[-1] == "Password (Enter keeps the current one): "
+    assert "Saved the changes to code.\n" in fake.text
+    assert "  Username:\n" in fake.text
+    assert "  URL:      https://example.com\n" in fake.text
+    assert "  Notes:    personal\n" in fake.text
+    assert "1 entry:\n  code  login\n" in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_edit_without_changes_saves_nothing(run: Run) -> None:
+    lines = ("edit github", "github", "", "https://github.com", "")  # the same values
+    fake = unlocked(run, *ADD_GITHUB, *lines, secrets=[SECRET, SECRET, ""])
+    assert "Nothing changed.\n" in fake.text
+    assert "Vault unlocked. Saved 1 time.\n" in unlocked(run).text
+
+
+@pytest.mark.usefixtures("alice")
+def test_edit_can_change_the_password(run: Run, accounts: Accounts) -> None:
+    new = "an0ther-Secret!"
+    unlocked(run, *ADD_GITHUB, "edit github", "", "", "", "", secrets=[SECRET, SECRET, new, new])
+    session = accounts.login("alice", PASSWORD)
+    assert session._entries["github"].password == new
+
+
+@pytest.mark.usefixtures("alice")
+def test_edit_refuses_a_rename_onto_another_entry(run: Run) -> None:
+    fake = unlocked(
+        run,
+        *ADD_GITHUB,
+        "add mail",
+        "",
+        "",
+        "",
+        "edit github",
+        "MAIL",
+        secrets=[SECRET] * 4,
+    )
+    assert "Error: an entry with that name already exists.\n" in fake.text
+    assert "Username [alice@example.com]: " not in fake.text  # it stopped at the name
+
+
+@pytest.mark.usefixtures("alice")
+def test_edit_cannot_clear_the_name(run: Run) -> None:
+    fake = unlocked(run, *ADD_GITHUB, "edit github", "-", secrets=[SECRET, SECRET])
+    assert f"Error: {entries.NAME_RULE}.\n" in fake.text
+
+
+@pytest.mark.usefixtures("alice")
+def test_rm_needs_the_name_typed_again(run: Run) -> None:
+    fake = unlocked(
+        run,
+        *ADD_GITHUB,
+        "rm github",
+        "gihtub",
+        "list",
+        "rm GITHUB",
+        "github",
+        "list",
+        secrets=[SECRET, SECRET],
+    )
+    assert fake.text.count("Type github again to delete it: ") == 2
+    assert "The names are different, so nothing was deleted.\n" in fake.text
+    assert "1 entry:\n  github  login\n" in fake.text
+    assert "Deleted github.\n" in fake.text
+    assert fake.text.rstrip().endswith(
+        "The vault is empty. Add an entry with: add <name>\nyunarpass:alice> \nVault locked."
+    )
+
+
+@pytest.mark.usefixtures("alice")
+def test_notes_with_line_breaks_are_shown_line_by_line(run: Run, accounts: Accounts) -> None:
+    session = accounts.login("alice", PASSWORD)
+    session.add("github", username="", password=SECRET, url="", notes="first\nsecond")
+    session.close()
+    fake = unlocked(run, "show github")
+    assert "  Notes:    first\n            second\n" in fake.text
+
+
+def test_a_prompt_shows_only_the_start_of_a_long_value() -> None:
+    assert cli._brief("short") == "short"
+    assert cli._brief("x" * 40) == "x" * 40
+    assert cli._brief("x" * 41) == "x" * 40 + "..."
+    assert cli._brief("first\nsecond") == "first..."
+
+
+@pytest.mark.usefixtures("alice")
+def test_two_prompts_do_not_overwrite_each_others_entries(accounts: Accounts) -> None:
+    typed = (["alice", "", "", ""], [PASSWORD, SECRET, SECRET])
+    one, two = FakeConsole(*typed), FakeConsole(*typed)
+    first, second = Repl(accounts, one.console()), Repl(accounts, two.console())
+    first.execute("login")
+    second.execute("login")
+    first.execute("add github")
+    second.execute("add mail")
+    assert "Added github.\n" in one.text
+    assert (
+        "Error: the vault file was changed by another session since you logged in, "
+        "so this change was not saved; log in again to continue.\n"
+    ) in two.text
+    assert [s.name for s in accounts.login("alice", PASSWORD).summaries()] == ["github"]
