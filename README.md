@@ -53,6 +53,15 @@ Before unlocking:
 | `recover` | Unlock with the recovery key, then set a new master password and get a new recovery key |
 | `quit` | Exit |
 
+`register` asks for a username, then for the master password twice. A username has 3 to 32
+characters: lowercase letters a-z, digits, `_` and `-`, starting with a letter or a digit. The
+master password needs 12 to 1024 characters and must not be one of the 10 000 most common
+passwords (the [SecLists](https://github.com/danielmiessler/SecLists) list, shipped with the
+program, checked offline and ignoring case). Creating the vault takes a moment, because the key is
+derived with Argon2id. The recovery key is then printed once, as eight groups of four characters.
+Write it down: it is not stored anywhere, and it is the only way back in if the master password is
+forgotten.
+
 After unlocking (`yunarpass>` prompt):
 
 | Command | Action |
@@ -131,7 +140,8 @@ also refuses a data file that is a link, has a second hard link or is larger tha
 Each vault is a JSON file, `vault-<random id>.json`. Its username, vault ID and key-derivation
 settings can be read, but they are authenticated, so an edited value makes the vault refuse to
 open; the entries and both copies of the data key are encrypted. The format is in
-[DESIGN.md §4](DESIGN.md#4-cryptographic-scheme-and-vault-format).
+[DESIGN.md §4](DESIGN.md#4-cryptographic-scheme-and-vault-format). `users.json` lists the
+usernames with their vault IDs, and nothing else.
 
 Every save writes a temporary file and renames it over the old one, so a crash or power cut leaves
 either the old or the new version, never a half-written file. The version before the last save is
