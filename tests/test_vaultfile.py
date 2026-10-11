@@ -96,8 +96,10 @@ def test_the_body_decrypts_to_the_entries(vault: VaultFile, dek: bytearray) -> N
 
 def test_no_entry_text_appears_in_the_file(vault: VaultFile) -> None:
     data = vaultfile.serialize(vault)
-    for text in ("github", "hunter2", "caf", "login"):
-        assert text.encode() not in data
+    # Whole words only: a short string of hex letters such as "caf" can turn
+    # up in the random vault ID or the Base64 by chance.
+    for text in (b"github", b"hunter2-but-longer", "café".encode(), b"caf\u00e9", b"login"):
+        assert text not in data
 
 
 def test_every_seal_uses_a_fresh_nonce(vault: VaultFile, dek: bytearray) -> None:

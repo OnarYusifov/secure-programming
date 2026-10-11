@@ -290,7 +290,15 @@ def test_no_entry_text_appears_in_the_file(session: Session) -> None:
     entry_id = add_github(session, "my-bank", username="jürgen-1987", notes="pin is 4321")
     data = vault_path(session).read_bytes()
     backup = vault_path(session).with_name(vault_path(session).name + ".bak").read_bytes()
-    for plaintext in ("my-bank", "jürgen", "j\\u00fcrgen", "4321", SECRET, "github.com", entry_id):
+    for plaintext in (
+        "my-bank",
+        "jürgen",
+        "j\\u00fcrgen",
+        "pin is 4321",
+        SECRET,
+        "github.com",
+        entry_id,
+    ):
         assert plaintext.encode() not in data
         assert plaintext.encode() not in backup
 
