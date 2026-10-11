@@ -24,9 +24,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from yunarpass import __version__, policy
+from yunarpass import __version__, entries, policy
+from yunarpass.entries import MASK, EntryError
 from yunarpass.policy import PolicyError
-from yunarpass.session import Session
+from yunarpass.session import Session, VaultLockedError
 from yunarpass.storage import DataDir, StorageError
 from yunarpass.text import sanitize
 from yunarpass.users import AccountError, Accounts, LoginError
@@ -60,12 +61,13 @@ class UsageError(Exception):
 
 # Errors whose messages are fixed strings written to be shown to the user.
 # Anything else is unexpected, and only the generic message is shown.
-_SAFE_ERRORS = (UsageError, StorageError, AccountError, PolicyError)
+_SAFE_ERRORS = (UsageError, StorageError, AccountError, PolicyError, EntryError, VaultLockedError)
 
 
 class Command(NamedTuple):
     run: Callable[[str], None]  # called with the rest of the line
     summary: str
+    arguments: str = ""  # shown by help, e.g. "<name>"
 
 
 class Repl:
@@ -93,6 +95,11 @@ class Repl:
                 "quit": Command(self.quit, "Exit"),
             }
         return {
+            "add": Command(self.add, "Add a login entry", "<name>"),
+            "list": Command(self.list_entries, "List the entries"),
+            "show": Command(self.show, "Show an entry; the password stays masked", "<name>"),
+            "edit": Command(self.edit, "Change an entry", "<name>"),
+            "rm": Command(self.rm, "Delete an entry", "<name>"),
             "help": Command(self.help, "Show this list"),
             "quit": Command(self.quit, "Lock the vault and exit"),
         }
@@ -100,6 +107,10 @@ class Repl:
     def say(self, *lines: str) -> None:
         """Print each argument as one line, sanitized."""
         self.console.write("".join(sanitize(line) + "\n" for line in lines))
+
+    def ask(self, prompt: str) -> str:
+        """Read a line that is not a secret, without surrounding spaces."""
+        return self.console.read_line(sanitize(prompt)).strip()
 
     def run(self) -> int:
         """Read and run commands until quit, Ctrl-C or the end of input."""
@@ -193,12 +204,113 @@ class Repl:
         # The counter lets the user notice an older copy put back in place (T9).
         self.say(f"Vault unlocked. Saved {saved} {'time' if saved == 1 else 'times'}.")
 
+    def _unlocked(self) -> Session:
+        if self.session is None:
+            raise VaultLockedError
+        return self.session
+
+    def add(self, args: str) -> None:
+        session = self._unlocked()
+        name = _entry_name("add", args)
+        # Each answer is checked as soon as it is typed, the name first.
+        session.check_new_name(name)
+        username = entries.check_username(self.ask("Username: "))
+        password = self._entry_password(self.console.read_secret("Password: "))
+        url = entries.check_url(self.ask("URL: "))
+        notes = entries.check_notes(self.ask("Notes: "))
+        session.add(name, username=username, password=password, url=url, notes=notes)
+        self.say(f"Added {name}.")
+
+    def _entry_password(self, typed: str) -> str:
+        """Check a password typed for an entry, and ask for it again."""
+        password = entries.check_password(typed)
+        if self.console.read_secret("Repeat the password: ") != password:
+            raise UsageError("the two passwords are different, so nothing was saved")
+        return password
+
+    def list_entries(self, args: str) -> None:
+        _no_arguments("list", args)
+        summaries = self._unlocked().summaries()
+        if not summaries:
+            self.say("The vault is empty. Add an entry with: add <name>")
+            return
+        width = max(len(summary.name) for summary in summaries)
+        count = len(summaries)
+        self.say(
+            f"{count} {'entry' if count == 1 else 'entries'}:",
+            *(f"  {summary.name:<{width}}  {summary.type}" for summary in summaries),
+        )
+
+    def show(self, args: str) -> None:
+        view = self._unlocked().view(_entry_name("show", args))
+        notes = view.notes.split("\n")
+        rows = [
+            ("Name", view.name),
+            ("Type", view.type),
+            ("Username", view.username),
+            ("Password", MASK),  # always the mask: the view has no password (T25)
+            ("URL", view.url),
+            ("Created", _time(view.created)),
+            ("Modified", _time(view.modified)),
+            ("Notes", notes[0]),
+        ]
+        self.say(
+            *(f"  {label + ':':<10}{value}".rstrip() for label, value in rows),
+            *(f"  {'':<10}{line}".rstrip() for line in notes[1:]),
+        )
+
+    def edit(self, args: str) -> None:
+        session = self._unlocked()
+        view = session.view(_entry_name("edit", args))
+        self.say(f"Editing {view.name}. Press Enter to keep a value, or type - to clear it.")
+        new_name: str | None = self.ask(f"Name [{view.name}]: ")
+        if not new_name or new_name == view.name:
+            new_name = None
+        elif entries.key(new_name) != entries.key(view.name):
+            session.check_new_name(new_name)
+        username = self._changed("Username", view.username, entries.check_username)
+        typed = self.console.read_secret("Password (Enter keeps the current one): ")
+        password = self._entry_password(typed) if typed else None
+        url = self._changed("URL", view.url, entries.check_url)
+        notes = self._changed("Notes", view.notes, entries.check_notes)
+        if (new_name, username, password, url, notes) == (None,) * 5:
+            self.say("Nothing changed.")
+            return
+        session.update(
+            view.name,
+            new_name=new_name,
+            username=username,
+            password=password,
+            url=url,
+            notes=notes,
+        )
+        self.say(f"Saved the changes to {new_name or view.name}.")
+
+    def _changed(self, label: str, current: str, check: Callable[[str], str]) -> str | None:
+        """Ask for a new value: None keeps the current one, and - clears it."""
+        answer = self.ask(f"{label} [{_brief(current)}]: ")
+        if not answer:
+            return None
+        value = check("" if answer == "-" else answer)
+        return None if value == current else value
+
+    def rm(self, args: str) -> None:
+        session = self._unlocked()
+        view = session.view(_entry_name("rm", args))
+        if self.ask(f"Type {view.name} again to delete it: ") != view.name:
+            self.say("The names are different, so nothing was deleted.")
+            return
+        session.remove(view.name)
+        self.say(f"Deleted {view.name}.")
+
     def help(self, args: str) -> None:
         _no_arguments("help", args)
-        commands = self.commands()
-        width = max(map(len, commands))
-        lines = (f"  {name:<{width}}  {command.summary}" for name, command in commands.items())
-        self.say("Commands:", *lines)
+        usage = {
+            f"{name} {command.arguments}".strip(): command.summary
+            for name, command in self.commands().items()
+        }
+        width = max(map(len, usage))
+        self.say("Commands:", *(f"  {form:<{width}}  {summary}" for form, summary in usage.items()))
 
     def quit(self, args: str) -> None:
         _no_arguments("quit", args)
@@ -209,6 +321,24 @@ def _no_arguments(name: str, args: str) -> None:
     # The arguments are never printed: they might be a secret.
     if args:
         raise UsageError(f"{name} takes no arguments")
+
+
+def _entry_name(command: str, args: str) -> str:
+    """The one argument of an entry command. An invalid name is not printed back."""
+    if not args:
+        raise UsageError(f"{command} needs the name of an entry: {command} <name>")
+    return entries.check_name(args)
+
+
+def _time(stamp: str) -> str:
+    """2026-10-11T15:02:03Z as 2026-10-11 15:02 UTC."""
+    return f"{stamp[:10]} {stamp[11:16]} UTC"
+
+
+def _brief(value: str, limit: int = 40) -> str:
+    """The start of a value, short enough to show in a prompt."""
+    first = value.split("\n", 1)[0]
+    return value if first == value and len(value) <= limit else first[:limit] + "..."
 
 
 USAGE = """\
