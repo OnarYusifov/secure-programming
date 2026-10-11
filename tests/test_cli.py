@@ -1070,8 +1070,10 @@ def test_copy_with_a_shared_name_asks_which_one(
 
 def test_show_with_a_shared_name_asks_which_one(run: Run, two_githubs: list[str]) -> None:
     personal, _ = two_githubs
-    fake = unlocked(run, "show GITHUB", "1")
+    fake = unlocked(run, "show GITHUB", "1", "show github", "")
     assert f"  ID:       {personal}\n  Name:     github\n" in fake.text
+    assert fake.text.count("  ID:  ") == 1  # the second show was cancelled
+    assert "Cancelled.\n" in fake.text
 
 
 @pytest.mark.parametrize(
