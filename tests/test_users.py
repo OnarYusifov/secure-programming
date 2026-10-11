@@ -3,22 +3,54 @@
 import base64
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from yunarpass import fsperm, secrets_gen, storage, users, vaultfile
+from yunarpass import crypto, fsperm, secrets_gen, storage, users, vaultfile
+from yunarpass.crypto import KdfParams
 from yunarpass.policy import PolicyError
 from yunarpass.storage import USERS_FILE, DataDir, StorageError
-from yunarpass.users import AccountError, Accounts
+from yunarpass.users import AccountError, Accounts, Backoff, LoginError
 from yunarpass.vaultfile import Body, VaultFile, VaultFormatError
 
 PASSWORD = "correct horse battery staple"
+BOB_PASSWORD = "a different long password"
+
+
+class FakeClock:
+    """A monotonic clock that moves only when sleep() is called.
+
+    Every sleep is logged. With interrupt_next set, the next sleep raises
+    KeyboardInterrupt instead, as Ctrl-C would.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.log: list[object] = []
+        self.interrupt_next = False
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        if self.interrupt_next:
+            self.interrupt_next = False
+            raise KeyboardInterrupt
+        self.log.append(seconds)
+        self.now += seconds
 
 
 @pytest.fixture
-def accounts(tmp_path: Path) -> Accounts:
-    return Accounts(DataDir.open(tmp_path / "data"))
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def accounts(tmp_path: Path, clock: FakeClock) -> Accounts:
+    return Accounts(DataDir.open(tmp_path / "data"), Backoff(clock.time, clock.sleep))
 
 
 def file_names(accounts: Accounts) -> list[str]:
@@ -261,3 +293,216 @@ def test_an_index_with_a_username_twice_is_refused() -> None:
     data = b'{"format": 1, "users": {"alice": "%s", "alice": "%s"}}' % (b"0" * 32, b"1" * 32)
     with pytest.raises(VaultFormatError, match="duplicate"):
         users.parse_index(data)
+
+
+# --- Login (UC2) ---------------------------------------------------------------------
+
+
+def log_kdf_calls(monkeypatch: pytest.MonkeyPatch, log: list[object]) -> None:
+    derive_kek = crypto.derive_kek
+
+    def logged(password: str, params: KdfParams) -> bytearray:
+        log.append("kdf")
+        return derive_kek(password, params)
+
+    monkeypatch.setattr(crypto, "derive_kek", logged)
+
+
+def vault_doc(accounts: Accounts, username: str) -> dict[str, Any]:
+    data = accounts.data_dir.read(storage.vault_file_name(index(accounts)[username]))
+    assert data is not None
+    doc: dict[str, Any] = json.loads(data)
+    return doc
+
+
+def rewrite_vault(
+    accounts: Accounts, username: str, change: Callable[[dict[str, Any]], None]
+) -> None:
+    doc = vault_doc(accounts, username)
+    change(doc)
+    name = storage.vault_file_name(index(accounts)[username])
+    accounts.data_dir.write(name, json.dumps(doc).encode())
+
+
+def test_the_right_password_unlocks_the_vault(accounts: Accounts) -> None:
+    accounts.register("alice", PASSWORD)
+    session = accounts.login("alice", PASSWORD)
+    assert session.username == "alice"
+    assert session.counter == 0
+    assert session.body == Body()
+    assert not session.closed
+
+
+def test_login_reads_the_saved_counter_and_entries(accounts: Accounts) -> None:
+    accounts.register("alice", PASSWORD)
+    vault = vault_of(accounts, "alice")
+    dek = vaultfile.unlock_with_password(vault, PASSWORD)
+    body = vaultfile.seal_body(vault.header, dek, Body(41, ({"name": "github"},)))
+    saved = VaultFile(vault.header, vault.password_dek, vault.recovery_dek, body)
+    name = storage.vault_file_name(vault.header.vault_id)
+    accounts.data_dir.write(name, vaultfile.serialize(saved))
+    session = accounts.login("alice", PASSWORD)
+    assert session.counter == 41
+    assert session.body.entries == ({"name": "github"},)
+
+
+@pytest.mark.parametrize(
+    ("username", "password"),
+    [
+        ("alice", PASSWORD + "!"),  # wrong password
+        ("alice", ""),
+        ("bob", PASSWORD),  # unknown user
+        ("Alice", PASSWORD),  # not on the allow-list
+        ("../alice", PASSWORD),
+        ("", PASSWORD),
+    ],
+)
+def test_every_failed_login_looks_the_same_and_costs_one_kdf_run(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch, username: str, password: str
+) -> None:
+    accounts.register("alice", PASSWORD)
+    calls: list[object] = []
+    log_kdf_calls(monkeypatch, calls)
+    opened: list[object] = []
+    monkeypatch.setattr(vaultfile, "open_body", lambda *args: opened.append(args))
+    with pytest.raises(LoginError) as caught:
+        accounts.login(username, password)
+    assert type(caught.value) is LoginError
+    assert str(caught.value) == "login failed"
+    assert calls == ["kdf"]  # the KDF ran once, for unknown users too (T4)
+    assert opened == []  # nothing from the vault was decrypted
+
+
+def test_failed_logins_wait_longer_each_time_up_to_the_cap(
+    accounts: Accounts, clock: FakeClock
+) -> None:
+    accounts.register("alice", PASSWORD)
+    for _ in range(8):
+        with pytest.raises(LoginError):
+            accounts.login("alice", "a wrong password")
+    assert clock.log == [1, 2, 4, 8, 16, 32, 32, 32]
+
+
+def test_a_successful_login_resets_the_delay(accounts: Accounts, clock: FakeClock) -> None:
+    accounts.register("alice", PASSWORD)
+    for _ in range(2):
+        with pytest.raises(LoginError):
+            accounts.login("alice", "a wrong password")
+    accounts.login("alice", PASSWORD)
+    with pytest.raises(LoginError):
+        accounts.login("alice", "a wrong password")
+    assert clock.log == [1, 2, 1]
+
+
+def test_interrupting_the_delay_does_not_let_the_next_attempt_skip_it(
+    accounts: Accounts, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    accounts.register("alice", PASSWORD)
+    clock.interrupt_next = True  # Ctrl-C during the delay after the failure
+    with pytest.raises(KeyboardInterrupt):
+        accounts.login("alice", "a wrong password")
+    log_kdf_calls(monkeypatch, clock.log)
+    accounts.login("alice", PASSWORD)
+    assert clock.log == [1, "kdf"]  # the full second first, then the password
+
+
+def test_the_real_backoff_uses_the_monotonic_clock_and_sleep() -> None:
+    backoff = Backoff()
+    backoff.wait()  # nothing failed yet: no delay
+    backoff.failed()
+    backoff.succeeded()
+    backoff.wait()
+
+
+def flip_a_body_byte(doc: dict[str, Any]) -> None:
+    ct = bytearray(base64.b64decode(doc["body"]["ct"]))
+    ct[0] ^= 1
+    doc["body"]["ct"] = base64.b64encode(ct).decode()
+
+
+def change_the_salt(doc: dict[str, Any]) -> None:
+    doc["kdf"]["salt"] = base64.b64encode(bytes(16)).decode()
+
+
+def rename_to_bob(doc: dict[str, Any]) -> None:
+    doc["username"] = "bob"
+
+
+def drop_a_field(doc: dict[str, Any]) -> None:
+    del doc["body"]
+
+
+@pytest.mark.parametrize("change", [flip_a_body_byte, change_the_salt, rename_to_bob, drop_a_field])
+def test_a_tampered_vault_fails_like_a_wrong_password(
+    accounts: Accounts,
+    monkeypatch: pytest.MonkeyPatch,
+    change: Callable[[dict[str, Any]], None],
+) -> None:
+    accounts.register("alice", PASSWORD)
+    rewrite_vault(accounts, "alice", change)
+    calls: list[object] = []
+    log_kdf_calls(monkeypatch, calls)
+    with pytest.raises(LoginError, match="login failed"):
+        accounts.login("alice", PASSWORD)
+    assert calls == ["kdf"]
+
+
+def test_a_missing_or_unreadable_vault_fails_like_a_wrong_password(accounts: Accounts) -> None:
+    accounts.register("alice", PASSWORD)
+    name = storage.vault_file_name(index(accounts)["alice"])
+    accounts.data_dir.write(name, b"not a vault")
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+    (accounts.data_dir.path / name).unlink()
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+
+
+def test_a_body_that_does_not_decrypt_fails_and_its_dek_is_wiped(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    accounts.register("alice", PASSWORD)
+    accounts.register("bob", PASSWORD)
+    bob_body = vault_doc(accounts, "bob")["body"]
+    rewrite_vault(accounts, "alice", lambda doc: doc.update(body=bob_body))
+    deks: list[bytearray] = []
+    unlock = vaultfile.unlock_with_password
+
+    def keep_dek(vault: VaultFile, password: str) -> bytearray:
+        deks.append(unlock(vault, password))
+        return deks[-1]
+
+    monkeypatch.setattr(vaultfile, "unlock_with_password", keep_dek)
+    with pytest.raises(LoginError):
+        accounts.login("alice", PASSWORD)
+    # The password was right, so a DEK was unwrapped; it is zeroed again.
+    assert deks == [bytearray(crypto.KEY_BYTES)]
+
+
+def test_a_vault_copied_over_another_users_vault_does_not_open(accounts: Accounts) -> None:
+    accounts.register("alice", PASSWORD)
+    accounts.register("bob", BOB_PASSWORD)
+    alice_vault = accounts.data_dir.read(storage.vault_file_name(index(accounts)["alice"]))
+    assert alice_vault is not None
+    accounts.data_dir.write(storage.vault_file_name(index(accounts)["bob"]), alice_vault)
+    for password in (BOB_PASSWORD, PASSWORD):
+        with pytest.raises(LoginError):
+            accounts.login("bob", password)
+    assert accounts.login("alice", PASSWORD).username == "alice"
+
+
+def test_users_json_pointing_at_another_users_vault_does_not_open_it(
+    accounts: Accounts,
+) -> None:
+    accounts.register("alice", PASSWORD)
+    alice_id = index(accounts)["alice"]
+    accounts.data_dir.write(USERS_FILE, users.serialize_index({"bob": alice_id}))
+    # Alice's password does unwrap that vault's DEK, but the vault is Alice's.
+    with pytest.raises(LoginError):
+        accounts.login("bob", PASSWORD)
+
+
+def test_a_damaged_index_stops_login_with_its_own_message(accounts: Accounts) -> None:
+    accounts.data_dir.write(USERS_FILE, b"[]")
+    with pytest.raises(StorageError, match="damaged"):
+        accounts.login("alice", PASSWORD)
