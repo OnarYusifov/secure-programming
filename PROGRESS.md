@@ -35,9 +35,10 @@ replaces the planned TUI is still in progress (#43–#47). Tracked in the
 | Build and run instructions that work on a clean machine | [README.md, *Build and run*](README.md#build-and-run). The `readme-smoke` CI job runs the README's install commands verbatim on fresh Windows and Linux runners on every change. Also checked by hand on 12 Oct 2026: a fresh clone on Windows 11 with Python 3.14.7, following the README alone |
 | A commit history showing incremental progress | Every unit of work is a GitHub issue closed by its own pull request: for this checkpoint, 18 issues (#12–#28 and #57) and their 18 pull requests (#30–#60). Pull requests are merged with rebase, so every small commit lands on `main` with its own date: `git log --reverse main` |
 
-The master password is not "stored with a hashing method such as bcrypt" (Projects.pdf §4.2),
-because nothing derived from it is stored at all. Argon2id, a password-hashing function like
-bcrypt, derives the key that unwraps the DEK, and AES-GCM checks the result. Argon2id won the
+The project brief asks for a master password "stored securely with a hashing method such as
+bcrypt" (Projects.pdf §4.2). Here nothing derived from it is stored at all: Argon2id, a
+password-hashing function like bcrypt, derives the key that unwraps the DEK, and AES-GCM checks the
+result. Argon2id won the
 Password Hashing Competition and is memory-hard, at 64 MiB per guess here, whereas bcrypt uses
 about 4 KiB and is therefore cheaper to attack with GPUs. A stored hash next to the vault would
 also give a thief a second target. Details:
@@ -132,16 +133,18 @@ run: `Vault locked after 5 minutes without input. Log in again to continue.`
 Then in PowerShell:
 
 ```powershell
-# 15. The vault file: the username, the vault ID, the Argon2id settings and Base64 only;
-#     no entry name, username, URL or password
+# 15. The vault file shows the account name, the vault ID, the Argon2id settings and Base64,
+#     but no entry's name, username, URL or password: the search finds nothing
 Get-Content $env:YUNARPASS_HOME\vault-*.json
 Select-String -Path $env:YUNARPASS_HOME\vault-*.json -Pattern bank, github, example -SimpleMatch
 
-# 16. Weaken the Argon2id settings in the header (3 iterations to 1): log in, and it fails
+# 16. Weaken the Argon2id settings in the header (3 iterations to 1), then log in: Login failed.
 $v = Get-ChildItem $env:YUNARPASS_HOME\vault-*.json
 (Get-Content $v -Raw) -replace '"t": 3', '"t": 1' | Set-Content $v -NoNewline -Encoding ascii
-#     Put it back, and the same login works again
+.venv\Scripts\python -m yunarpass
+#     Put the 3 back, and the same login works again
 (Get-Content $v -Raw) -replace '"t": 1', '"t": 3' | Set-Content $v -NoNewline -Encoding ascii
+.venv\Scripts\python -m yunarpass
 
 # 17. Owner-only: one access entry, for the current user, inherited from nothing
 (Get-Acl $env:YUNARPASS_HOME).Access | Format-Table IdentityReference, FileSystemRights, IsInherited
