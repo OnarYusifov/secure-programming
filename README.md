@@ -81,12 +81,24 @@ After unlocking (`yunarpass:<username>>` prompt):
 | `copy <name>` | Copy the password to the clipboard; cleared after 20 s, and kept out of the clipboard history on Windows |
 | `totp <name>` | Show the current TOTP code |
 | `ssh-load <name>` | Load the key into `ssh-agent` for 10 minutes |
-| `edit <name>` | Edit an entry; the password prompt is masked and also accepts `gen` |
-| `rm <name>` | Delete an entry, after confirmation |
+| `edit <name>` | Edit an entry: Enter keeps a value, `-` clears it; the password prompt is masked and also accepts `gen` |
+| `rm <name>` | Delete an entry, after its name is typed again |
 | `gen [length]` | Generate a password (20 characters by default, 12 to 128) with letters, digits and symbols, and copy it to the clipboard; it is never printed |
 | `passwd` | Change the master password |
 | `lock` | Lock the vault and clear the clipboard; also happens automatically after 5 minutes idle |
 | `quit` | Lock and exit |
+
+Entry names have 1 to 64 characters: letters, digits, `.`, `_`, `@` and `-`, starting with a letter
+or a digit. No two entries can have the same name, ignoring case, and `show GitHub` finds the entry
+`github`. A username can have up to 256 characters, a password 1024, a URL 2048 and the notes 4096;
+control characters and terminal escape sequences are refused in all of them. `add` checks each
+answer as soon as it is typed and asks for the password twice. `show` prints every field except the
+password, which always appears as `********`, whatever its length.
+
+Every change is saved at once: the vault's counter goes up by one, and the vault file is encrypted
+again under a fresh nonce and replaced atomically. If another yunarpass prompt logged in to the
+same account has saved in the meantime, the change is refused instead of overwriting the other
+one; log in again to see the newer version.
 
 Checkpoint 2 delivers `register`, `login`, `recover`, the login entries (`add`, `list`, `show`,
 `edit`, `rm`), `copy`, `gen`, `passwd`, `lock` and auto-lock. Checkpoint 3 adds TOTP, SSH keys and a
