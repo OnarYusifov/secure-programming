@@ -395,7 +395,9 @@ def test_one_save_is_singular(
     run: Run, accounts: Accounts, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault, dek = vaultfile.create("alice", PASSWORD, bytes(20), Body(1, ()))
-    monkeypatch.setattr(accounts, "login", lambda *args: Session(vault, dek, Body(1, ())))
+    monkeypatch.setattr(
+        accounts, "login", lambda *args: Session(vault, dek, Body(1, ()), accounts.data_dir)
+    )
     fake = run("login", "alice", secrets=[PASSWORD])
     assert "Vault unlocked. Saved 1 time.\n" in fake.text
 
