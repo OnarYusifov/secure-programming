@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yunarpass"
-version = "0.0.1"
+version = "0.1.0"
 description = "A local, multi-user password manager for the terminal (ICS0022 project)"
 requires-python = ">=3.12"
 # Minimum versions only; the exact, hash-checked versions are in requirements.txt.
