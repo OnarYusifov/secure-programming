@@ -181,12 +181,69 @@ jobs:
         env:
           README_BLOCK: ${{ matrix.readme }}
 
+  # yunarpass.exe: one file with Python and every dependency inside, for
+  # Windows users who have no Python. Built on every change, so a change that
+  # breaks the build fails its pull request; the release job publishes the one
+  # built for a v* tag.
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No pip cache: everything that goes into the .exe is downloaded fresh
+      # and checked against the pinned hashes.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install (hash-checked, build tools included)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.txt -r requirements-build.txt
+          pip install --no-deps --no-build-isolation .
+
+      # --collect-data: the common-password list, which policy.py reads with
+      # importlib.resources, so PyInstaller does not see it as an import.
+      # --hidden-import: pywin32's C code imports win32timezone when it returns
+      # a file time, which the data directory check reads.
+      - name: Build yunarpass.exe (PyInstaller)
+        run: >
+          pyinstaller --onefile --console --name yunarpass
+          --collect-data yunarpass --hidden-import win32timezone
+          --noconfirm --clean src/yunarpass/__main__.py
+
+      # With stdin closed the program starts, creates the owner-only data
+      # directory (the pywin32 ACL code, inside the .exe) and exits 0 at the end
+      # of input. Python prints CRLF line ends here, hence the tr.
+      - name: Smoke-test the .exe
+        env:
+          YUNARPASS_HOME: ${{ runner.temp }}\yunarpass-home
+        run: |
+          version="$(dist/yunarpass.exe --version | tr -d '\r')"
+          echo "$version"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            test "$version" = "yunarpass ${GITHUB_REF_NAME#v}"
+          fi
+          dist/yunarpass.exe < /dev/null
+          test -d "$YUNARPASS_HOME"
+          pyi-archive_viewer --list --brief dist/yunarpass.exe | grep -E 'yunarpass[\\/]data[\\/]common-passwords\.txt'
+          sha256sum dist/yunarpass.exe
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yunarpass-exe
+          path: dist/yunarpass.exe
+          if-no-files-found: error
+          retention-days: 7
+
   # The one check that branch protection on main requires. Matrix entries
   # and new jobs can change without touching the protection rule; they
   # only need to be listed here.
   ci-ok:
     if: always()
-    needs: [checks, secrets, tests, coverage, readme-smoke]
+    needs: [checks, secrets, tests, coverage, readme-smoke, exe]
     runs-on: ubuntu-latest
     steps:
       - name: All required jobs passed
@@ -196,10 +253,12 @@ jobs:
           TESTS: ${{ needs.tests.result }}
           COVERAGE: ${{ needs.coverage.result }}
           README_SMOKE: ${{ needs.readme-smoke.result }}
+          EXE: ${{ needs.exe.result }}
         run: |
-          echo "checks: $CHECKS, secrets: $SECRETS, tests: $TESTS, coverage: $COVERAGE, readme-smoke: $README_SMOKE"
+          echo "checks: $CHECKS, secrets: $SECRETS, tests: $TESTS, coverage: $COVERAGE, readme-smoke: $README_SMOKE, exe: $EXE"
           test "$CHECKS" = success
           test "$SECRETS" = success
           test "$TESTS" = success
           test "$COVERAGE" = success
           test "$README_SMOKE" = success
+          test "$EXE" = success
