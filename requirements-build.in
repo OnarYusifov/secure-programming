@@ -1,0 +1,10 @@
+# Tools that build the Windows .exe (CI's exe job). Edit this file, then regenerate
+# requirements-build.txt on Windows, where the .exe is built: some of PyInstaller's
+# dependencies (pefile, pywin32-ctypes) are only resolved there.
+#   python -m piptools compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url requirements-build.in
+# Both files are installed together, so every package they share must have the
+# same pin: the constraint below makes this file reuse the pins of requirements.txt.
+
+-c requirements.txt
+
+pyinstaller
