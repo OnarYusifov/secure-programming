@@ -157,6 +157,33 @@ into Checkpoint 2: the CP2 brief requires an interface that never prints passwor
 printing, the clipboard is the only way to get a password out (see
 [DESIGN.md §6](DESIGN.md#6-as-built)).
 
+## Download for Windows
+
+On Windows 10 and 11 you can run yunarpass without installing Python: `yunarpass.exe` is one file
+with Python and every dependency inside. Download it from the
+[latest release](https://github.com/OnarYusifov/secure-programming/releases/latest) and double-click
+it; the yunarpass prompt opens in a console window. Your data is stored in the same place as with
+the Python install (see [Build and run](#build-and-run)).
+
+The .exe is not code-signed, so the browser may say it is not commonly downloaded (choose to keep
+it), and Windows SmartScreen may say "Windows protected your PC" with an unknown publisher (choose
+**More info**, then **Run anyway**). If the window closes as soon as it opens, start the program
+from PowerShell (`.\yunarpass.exe`) to read the message it printed.
+
+To check the download, compare its SHA-256 with `yunarpass.exe.sha256` from the same release:
+
+```powershell
+Get-FileHash .\yunarpass.exe -Algorithm SHA256
+```
+
+That only catches a damaged download, because whoever could replace the .exe could replace the
+checksum too. To check that the file was built by this repository's CI from a tagged commit, use
+the [GitHub CLI](https://cli.github.com/):
+
+```powershell
+gh attestation verify .\yunarpass.exe --repo OnarYusifov/secure-programming
+```
+
 ## Build and run
 
 Requirements: Python 3.12 or newer. Windows 10/11 is the primary platform, used for development
@@ -243,12 +270,36 @@ the Windows-only `pywin32` pin keeps its marker:
 python -m piptools compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url requirements.in
 ```
 
+To build `yunarpass.exe` on Windows, in the activated virtual environment:
+
+```powershell
+pip install --require-hashes -r requirements.txt -r requirements-build.txt
+pip install --no-deps --no-build-isolation .
+pyinstaller --onefile --console --name yunarpass --collect-data yunarpass --hidden-import win32timezone --noconfirm --clean src/yunarpass/__main__.py
+```
+
+The .exe is written to `dist\`. The build tools are pinned in `requirements-build.txt`, which is
+regenerated from `requirements-build.in` with the same `piptools compile` command.
+
+To make a release, set the new version in `pyproject.toml` and `src/yunarpass/__init__.py` in a
+pull request. Once it is merged, tag that commit on `main` and push the tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+CI then runs every check on the tagged commit and stops if the version the .exe reports differs
+from the tag. If everything passes, it publishes a GitHub Release with `yunarpass.exe`, its
+SHA-256 and a build-provenance attestation.
+
 The same checks run in CI on every pull request and every push to `main`: lint and security scans
 once, a [gitleaks](https://github.com/gitleaks/gitleaks) secret scan over the whole git history,
-type checks and tests on Ubuntu and Windows with Python 3.12 and 3.14, and a coverage job that
-combines the four test runs and checks the 80% floor. The `ci-ok` job passes only when all of them
-pass, and `main` requires it. With gitleaks installed, the secret scan runs locally as
-`gitleaks git --redact .`.
+type checks and tests on Ubuntu and Windows with Python 3.12 and 3.14, a coverage job that
+combines the four test runs and checks the 80% floor, and an `exe` job that builds `yunarpass.exe`
+on Windows, starts it once and keeps it on the run's page for seven days. The `ci-ok` job passes
+only when all of them pass, and `main` requires it. With gitleaks installed, the secret scan runs
+locally as `gitleaks git --redact .`.
 
 ## Status
 
