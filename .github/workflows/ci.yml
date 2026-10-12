@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"] # a release: every job below runs, then the release job
   pull_request:
 
 permissions:
@@ -262,3 +263,46 @@ jobs:
           test "$COVERAGE" = success
           test "$README_SMOKE" = success
           test "$EXE" = success
+
+  # Publishes the .exe built above on a GitHub Release, for a v* tag only and
+  # only once every check has passed on the tagged commit. The one job that
+  # can write; the rest of the workflow keeps contents: read.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: ci-ok
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the attestation (Sigstore, no stored key)
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: yunarpass-exe
+
+      # The .sha256 file only catches a damaged download: anyone who could
+      # swap the .exe could swap it too. The attestation is what ties the .exe
+      # to this repository, this workflow and this commit.
+      - name: Checksum
+        run: sha256sum yunarpass.exe | tee yunarpass.exe.sha256
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: yunarpass.exe
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NOTES: |
+            yunarpass.exe runs on Windows 10 and 11 without Python. Download it and
+            double-click it; the yunarpass prompt opens in a console window.
+            The .exe is not code-signed, so Windows may warn about an unknown
+            publisher: choose More info, then Run anyway.
+
+            Check the download (the README explains both):
+            - Get-FileHash yunarpass.exe -Algorithm SHA256, against yunarpass.exe.sha256
+            - gh attestation verify yunarpass.exe --repo ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" yunarpass.exe yunarpass.exe.sha256 \
+            --verify-tag --title "yunarpass $GITHUB_REF_NAME" --notes "$NOTES"
